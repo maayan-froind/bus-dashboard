@@ -1,0 +1,10 @@
+streamlit>=1.50
+pandas
+numpy
+pyarrow
+requests
+plotly
+folium
+streamlit-folium
+streamlit-aggrid
+openpyxl
