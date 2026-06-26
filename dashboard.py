@@ -228,6 +228,20 @@ def load_data():
         df["shape"] = "[]"
     df["shape"] = df["shape"].apply(lambda v: v if isinstance(v, str) else "[]")
 
+    # stage 6: off-peak headway + daily trips/direction → frequency columns
+    s6_path = os.path.join(base, "stage6_frequency.parquet")
+    if os.path.exists(s6_path):
+        s6 = pd.read_parquet(s6_path)
+        s6["makat"] = s6["makat"].astype(str)
+        df = df.merge(s6, on="makat", how="left")
+    for _c in ("daily_trips_dir", "headway_offpeak"):
+        if _c not in df.columns:
+            df[_c] = np.nan
+    # buses/hour = 60 / headway (NaN when no service / unknown headway)
+    df["freq_peak"]    = (60.0 / df["headway_min"]).replace([np.inf, -np.inf], np.nan).round(1)
+    df["freq_offpeak"] = (60.0 / df["headway_offpeak"]).replace([np.inf, -np.inf], np.nan).round(1)
+    df["daily_trips"]  = df["daily_trips_dir"].round(0)
+
     if "cities" not in df.columns:
         df["cities"] = [[] for _ in range(len(df))]
     if "stops" not in df.columns:
@@ -412,29 +426,13 @@ def search_options():
 # (The central search lives lower, under the page title — its value is read from
 #  session_state below so filtering can run before that widget is rendered.)
 with st.container(key="filterbar"):
-    cols = st.columns([1.4, 1.0, 1.1, 1.3, 1.1, 1.3, 1.5])
+    cols = st.columns([1.4, 1.0, 1.1, 1.3, 1.1, 1.3])
     weights, min_trips = render_weights(cols[0])
     sel_ops      = filter_chip(cols[1], "מפעיל",        "operator",     "op")
     sel_district = filter_chip(cols[2], "מחוז",         "district",     "district")
     sel_service  = filter_chip(cols[3], "סוג קו שירות", "service_type", "service")
     sel_partic   = filter_chip(cols[4], "ייחודיות",     "particular",   "partic")
     sel_bustype  = filter_chip(cols[5], "סוג אוטובוס",  "bus_type",     "bustype")
-
-    # Period filter (last chip)
-    today = date.today()
-    with cols[6].popover("📅 תקופה", use_container_width=False):
-        date_mode = st.radio(
-            "טווח", options=["החודש", "השנה", "מותאם"],
-            horizontal=True, key="date_mode", label_visibility="collapsed",
-        )
-        if date_mode == "החודש":
-            date_from, date_to = today.replace(day=1), today
-        elif date_mode == "השנה":
-            date_from, date_to = today.replace(month=1, day=1), today
-        else:
-            date_from = st.date_input("מתאריך", value=today.replace(month=1, day=1), key="d_from")
-            date_to   = st.date_input("עד תאריך", value=today, key="d_to")
-        st.caption(f"{date_from.strftime('%d/%m/%Y')} — {date_to.strftime('%d/%m/%Y')}")
 
 
 # ── apply filters ─────────────────────────────────────────────────────────────
@@ -540,18 +538,35 @@ k2.metric("הטוב ביותר",
 k3.metric("Headway ממוצע", f"{df_view['headway_min'].mean():.2f} דק'")
 k4.metric("מהירות ממוצעת", f"{df_view['AverageSpeed'].mean():.2f} קמ״ש")
 
-st.subheader("טבלת דירוג")
+_tt1, _tt2 = st.columns([3, 1])
+_tt1.subheader("טבלת דירוג")
+fullscreen = _tt2.toggle("🔳 מסך מלא", key="fullscreen",
+                         help="הסתרת המפה והרחבת הטבלה לרוחב וגובה מלאים")
+if fullscreen:
+    st.markdown(
+        "<style>"
+        # hide the pinned map and let the content fill the whole width
+        "[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium'])"
+        "{display:none !important;}"
+        ".block-container,[data-testid='stMainBlockContainer']"
+        "{margin-left:0 !important;max-width:100% !important;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
 display_cols = {
     "line_number":         "קו",
     "makat":               "מק״ט",
     "operator":            "מפעיל",
     "cluster":             "אשכול",
     "headway_min":         "Headway (דק')",
+    "freq_peak":           "תדירות שיא",
+    "freq_offpeak":        "תדירות שפל",
+    "daily_trips":         "תדירות יומית",
     "AverageSpeed":        "מהירות (קמ״ש)",
     "length_km":           "אורך (ק״מ)",
     "circuity":            "Circuity",
-    "PKM":                 "נוסעים/ק״מ",
-    "avg_pass_ride":       "נוסעים/נסיעה",
+    "PKM":                 "נוסעים לק״מ",
+    "avg_pass_ride":       "נוסעים לנסיעה",
     "trip_execution_rate": "% ביצוע",
     "ציון סופי":           "ציון",
 }
@@ -566,9 +581,38 @@ show_df.insert(0, " ", "")
 show_df["_color"] = [OP_COLORS.get(o, DEFAULT_OP_COLOR) for o in df_view["operator"]]
 show_df["_idx"] = list(range(len(df_view)))
 
+
+def score_breakdown(row, weights):
+    """List of (label, sub_score, weight%, contribution) for a route's score."""
+    items = []
+    for col, w in weights.items():
+        v = row.get(col)
+        if w <= 0 or v is None or (isinstance(v, float) and pd.isna(v)):
+            continue
+        items.append((PARAM_LABELS[col], float(v), int(w)))
+    tw = sum(w for *_, w in items)
+    if tw == 0:
+        return [], 0.0
+    out = [(lbl, v, w, v * w / tw) for lbl, v, w in items]
+    out.sort(key=lambda x: -x[3])
+    return out, sum(c for *_, c in out)
+
+
+def score_tip(row, weights):
+    rows, final = score_breakdown(row, weights)
+    if not rows:
+        return "אין מספיק נתונים לחישוב הציון"
+    lines = [f"• {lbl}: {v:.0f} × {w}% → {c:.1f}" for lbl, v, w, c in rows]
+    return ("איך חושב הציון (0–100):\n" + "\n".join(lines)
+            + f"\n──────────\nציון סופי: {final:.1f}")
+
+
+# hover tooltip on the score cell — explains the weighted breakdown per route
+show_df["_scoretip"] = [score_tip(df_view.iloc[i], weights) for i in range(len(df_view))]
+
 # ── export to Excel (RTL sheet) ───────────────────────────────────────────────
 def _to_excel(df):
-    out = df.drop(columns=[" ", "_color", "_idx"], errors="ignore").copy()
+    out = df.drop(columns=[" ", "_color", "_idx", "_scoretip"], errors="ignore").copy()
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xl:
         out.to_excel(xl, index=False, sheet_name="דירוג קווים")
@@ -599,34 +643,72 @@ _score_js = JsCode(
 # (rank, line, makat, cluster, score) are pinned so they're always fully visible.
 _tip = JsCode("function(p){return p.value;}")
 gb = GridOptionsBuilder.from_dataframe(show_df)
-# every column is sortable (click header) and filterable (header menu / funnel)
+# sortable + filterable. Headers are shown on a single line and each column is
+# min-sized to fit its full header text (st_aggrid 1.0.5 + RTL can't wrap header
+# text reliably — it collapses the label — so we never risk a cut-off word).
+# minWidth (not fixed width) lets columns stretch to fill the grid (no white gap)
+# and fall back to a horizontal scroll on narrow screens.
 gb.configure_default_column(resizable=True, sortable=True, filter="agTextColumnFilter",
-                            floatingFilter=False, width=100,
+                            floatingFilter=False, minWidth=74,
                             cellStyle={"textAlign": "right"}, tooltipValueGetter=_tip)
 gb.configure_selection("multiple", use_checkbox=True, header_checkbox=True)
 gb.configure_column("_color", hide=True)
 gb.configure_column("_idx", hide=True)
-# dedicated selection-checkbox column (no sort/filter), then pinned right cols
-gb.configure_column(" ", width=44, pinned="right", checkboxSelection=True,
-                    headerCheckboxSelection=True, sortable=False, filter=False)
-gb.configure_column("קו", cellStyle=_badge_js, width=64, pinned="right")
-gb.configure_column("מק״ט", width=90, pinned="right", filter="agNumberColumnFilter")
-gb.configure_column("אשכול", width=160, pinned="right")
-# pinned left (always visible): score
-gb.configure_column("ציון", cellStyle=_score_js, width=84, pinned="left",
-                    filter="agNumberColumnFilter", sort="desc")
-gb.configure_column("מפעיל", width=130)
-# numeric columns get a number filter (>, <, range) instead of text
-for _nc in ["Headway (דק')", "מהירות (קמ״ש)", "אורך (ק״מ)", "Circuity",
-            "נוסעים/ק״מ", "נוסעים/נסיעה"]:
+gb.configure_column("_scoretip", hide=True)
+# narrow fixed columns that should NOT stretch (suppressSizeToFit keeps them small)
+gb.configure_column(" ", width=40, minWidth=40, maxWidth=40, pinned="right",
+                    checkboxSelection=True, headerCheckboxSelection=True,
+                    sortable=False, filter=False, suppressSizeToFit=True)
+gb.configure_column("קו", cellStyle=_badge_js, width=56, minWidth=52, maxWidth=64,
+                    pinned="right", suppressSizeToFit=True)
+gb.configure_column("מק״ט", width=80, minWidth=74, pinned="right",
+                    filter="agNumberColumnFilter", suppressSizeToFit=True)
+gb.configure_column("אשכול", width=132, minWidth=120, pinned="right",
+                    suppressSizeToFit=True)
+# pinned left (always visible): score — whole number, tooltip explains it
+gb.configure_column(
+    "ציון", cellStyle=_score_js, width=68, minWidth=68, maxWidth=80, pinned="left",
+    filter="agNumberColumnFilter", sort="desc", suppressSizeToFit=True,
+    valueFormatter=JsCode("function(p){return p.value==null?'':Math.round(p.value);}"),
+    tooltipValueGetter=JsCode("function(p){return p.data._scoretip;}"),
+)
+gb.configure_column("מפעיל", minWidth=100)
+# numeric columns: number filter + per-column minWidth that fits the FULL
+# single-line header (measured width + padding/sort-icon overhead) so no word
+# is ever cut off. On wide screens sizeColumnsToFit stretches them further.
+_num_minw = {
+    "Headway (דק')": 120, "מהירות (קמ״ש)": 118, "נוסעים לנסיעה": 112,
+    "תדירות יומית": 104, "נוסעים לק״מ": 102, "תדירות שפל": 102,
+    "תדירות שיא": 98, "אורך (ק״מ)": 94, "Circuity": 80,
+}
+for _nc, _mw in _num_minw.items():
     if _nc in show_df.columns:
-        gb.configure_column(_nc, filter="agNumberColumnFilter")
-gb.configure_grid_options(enableRtl=True, rowHeight=34, enableBrowserTooltips=True)
+        gb.configure_column(_nc, filter="agNumberColumnFilter", minWidth=_mw)
+# native tooltips + fill the width on load and on any resize (no leftover white gap)
+gb.configure_grid_options(
+    enableRtl=True, rowHeight=34,
+    enableBrowserTooltips=False, tooltipShowDelay=250,
+    onFirstDataRendered=JsCode("function(p){p.api.sizeColumnsToFit();}"),
+    onGridSizeChanged=JsCode("function(p){p.api.sizeColumnsToFit();}"),
+)
 grid = AgGrid(
     show_df, gridOptions=gb.build(),
     update_mode=GridUpdateMode.SELECTION_CHANGED,
-    allow_unsafe_jscode=True, height=600, theme="alpine",
-    fit_columns_on_grid_load=False, key="ranking_grid",
+    allow_unsafe_jscode=True, height=(820 if fullscreen else 600), theme="alpine",
+    fit_columns_on_grid_load=True, key="ranking_grid",
+    custom_css={
+        ".ag-tooltip": {
+            "white-space": "pre-line", "direction": "rtl", "text-align": "right",
+            "font-size": "12px", "line-height": "1.55", "max-width": "340px",
+            "background": "#202124", "color": "#fff", "border-radius": "8px",
+            "padding": "8px 11px", "box-shadow": "0 2px 8px rgba(0,0,0,.4)",
+        },
+        # compact single-line header font (columns are sized to fit each label)
+        ".ag-header-cell-text": {"font-size": "11.5px", "white-space": "nowrap"},
+        # trim header padding so the full label fits without huge columns
+        ".ag-header-cell": {"padding-left": "5px !important",
+                            "padding-right": "5px !important"},
+    },
 )
 
 # export button — below the table, aligned to its left edge (RTL → leftmost column)
@@ -712,6 +794,23 @@ if not param_df.empty:
                           plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                           margin=dict(t=50, b=40, l=20, r=20))
     st.plotly_chart(fig_bar, use_container_width=True)
+
+# 1b) score reasoning — weighted breakdown table (why this line got its score)
+_bk_rows, _bk_final = score_breakdown(sel_row, weights)
+if _bk_rows:
+    with st.expander("❓ איך התקבל הציון? (פירוק משוקלל)", expanded=False):
+        st.caption("הציון הוא ממוצע משוקלל של ציוני-המשנה (0–100). "
+                   "התרומה = ציון-משנה × משקל ÷ סך המשקלים הזמינים.")
+        bk_df = pd.DataFrame(
+            [(lbl, round(v, 1), f"{w}%", round(c, 1)) for lbl, v, w, c in _bk_rows],
+            columns=["פרמטר", "ציון משנה", "משקל", "תרומה לציון"],
+        )
+        st.dataframe(
+            bk_df.style.set_properties(**{"text-align": "right", "direction": "rtl"})
+                 .background_gradient(subset=["תרומה לציון"], cmap="Blues"),
+            use_container_width=True, hide_index=True,
+        )
+        st.markdown(f"**ציון סופי = {_bk_final:.1f}**  (סכום התרומות)")
 
 # 2) all-source data grouped into tabs
 tab_gtfs, tab_ride, tab_dirs, tab_score = st.tabs(
@@ -928,9 +1027,13 @@ if drawn:
     st.caption(f"מציג **{drawn}** קווים: {nums} · סמנו עוד שורות בטבלה")
 else:
     st.caption("אין נתוני מסלול לקווים שנבחרו.")
-# inner map height ≥ tallest viewports so it fills the 100vh CSS-pinned iframe
-# (no white gap below the map); excess is simply clipped at the bottom.
-st_folium(fmap, use_container_width=True, height=1400, returned_objects=[],
-          key="route_map")
+# Render the map only when NOT in full-screen mode — a Leaflet map built inside a
+# hidden (display:none) container can't compute size/bounds and ends up zoomed out.
+# Keying the widget on the current selection forces a fresh fit on every change, so
+# the map always re-focuses on the selected route (incl. when leaving full screen).
+if not fullscreen:
+    _map_key = "route_map_" + "_".join(str(i) for i in sel_indices)
+    st_folium(fmap, use_container_width=True, height=1400, returned_objects=[],
+              key=_map_key)
 
 st.caption("מקורות: GTFS (משרד התחבורה) · Open Bus Stride API · data.gov.il נסועה Q1-2026")
