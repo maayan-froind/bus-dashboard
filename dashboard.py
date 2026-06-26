@@ -805,9 +805,25 @@ if _bk_rows:
             [(lbl, round(v, 1), f"{w}%", round(c, 1)) for lbl, v, w, c in _bk_rows],
             columns=["פרמטר", "ציון משנה", "משקל", "תרומה לציון"],
         )
+        # blue gradient on the contribution column WITHOUT matplotlib
+        # (Styler.background_gradient needs matplotlib, absent on Streamlit Cloud)
+        _contrib = bk_df["תרומה לציון"].astype(float)
+        _cmax = _contrib.max() or 1.0
+
+        def _blue(col):
+            out = []
+            for v in col:
+                f = max(0.0, min(1.0, float(v) / _cmax))
+                r = int(232 - f * (232 - 8))
+                g = int(244 - f * (244 - 81))
+                b = int(255 - f * (255 - 156))
+                txt = "#fff" if f > 0.55 else "#202124"
+                out.append(f"background-color:rgb({r},{g},{b});color:{txt}")
+            return out
+
         st.dataframe(
             bk_df.style.set_properties(**{"text-align": "right", "direction": "rtl"})
-                 .background_gradient(subset=["תרומה לציון"], cmap="Blues"),
+                 .apply(_blue, subset=["תרומה לציון"]),
             use_container_width=True, hide_index=True,
         )
         st.markdown(f"**ציון סופי = {_bk_final:.1f}**  (סכום התרומות)")
