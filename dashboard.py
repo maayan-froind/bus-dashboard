@@ -14,7 +14,6 @@ import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
 import folium
-from folium.plugins import Geocoder
 from streamlit_folium import st_folium
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, JsCode
 
@@ -85,6 +84,10 @@ _MD_CSS = (
 "hr{margin:1rem 0 !important;border-color:var(--md-outline) !important;}"
 "div[data-testid='stHorizontalBlock'] label{font-size:0.82rem;color:var(--md-on-surface-var);}"
 "[data-testid='stCaptionContainer']{color:var(--md-on-surface-var);text-align:right;}"
+# central search box (under the title) — taller & more prominent
+".st-key-searchbox [data-baseweb='select'] > div{min-height:52px !important;border-radius:12px !important;font-size:1.05rem !important;border-color:var(--md-primary) !important;box-shadow:var(--md-elev-1);}"
+".st-key-searchbox [data-baseweb='select'] input::placeholder{font-size:1.05rem;}"
+".st-key-searchbox{margin-bottom:0.6rem;}"
 # hide Streamlit's default top toolbar (the white 'Deploy' strip)
 "[data-testid='stHeader']{display:none !important;}"
 "[data-testid='stToolbar']{display:none !important;}"
@@ -106,14 +109,14 @@ _MD_CSS = (
 # hide the unused native sidebar entirely
 "[data-testid='stSidebar'],[data-testid='stSidebarCollapsedControl'],[data-testid='collapsedControl']{display:none !important;}"
 # pin the folium map element to the left half at full viewport height
-"[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium']){position:fixed !important;left:0 !important;top:132px !important;width:50vw !important;height:calc(100vh - 132px) !important;z-index:500;margin:0 !important;padding:0 !important;}"
-"[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium'])>div,iframe[title='streamlit_folium.st_folium']{width:50vw !important;height:calc(100vh - 132px) !important;}"
+"[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium']){position:fixed !important;left:0 !important;top:124px !important;width:50vw !important;height:calc(100vh - 124px) !important;z-index:500;margin:0 !important;padding:0 !important;}"
+"[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium'])>div,iframe[title='streamlit_folium.st_folium']{width:50vw !important;height:calc(100vh - 124px) !important;}"
 # header + filter bar always span the full screen width, sitting above the map
 # header + filter bar are fixed to the viewport, full width, stacked at the top
 ".lm-header{position:fixed !important;top:0 !important;left:0 !important;width:100vw !important;z-index:601 !important;margin:0 !important;border-radius:0 !important;box-sizing:border-box;}"
 ".st-key-filterbar{position:fixed !important;top:60px !important;left:0 !important;width:100vw !important;z-index:600 !important;margin:0 !important;background:var(--md-surface);box-shadow:var(--md-elev-1);padding:0.35rem 1.2rem !important;box-sizing:border-box;}"
 # content + map start below the two fixed bars
-".block-container,[data-testid='stMainBlockContainer']{padding-top:128px !important;}"
+".block-container,[data-testid='stMainBlockContainer']{padding-top:124px !important;}"
 # ===== responsive: narrower laptops (≈1366px) — give the data side more room =====
 "@media (max-width:1500px){"
 ".block-container,[data-testid='stMainBlockContainer']{margin-left:42vw !important;max-width:56vw !important;padding-left:0.7rem !important;padding-right:1rem !important;}"
@@ -215,6 +218,16 @@ def load_data():
         s4["makat"] = s4["makat"].astype(str)
         df = df.merge(s4.drop(columns=["line_number", "operator"]),
                       on="makat", how="left")
+    # stage 5: road-following route shapes (OSRM) for accurate map polylines
+    s5_path = os.path.join(base, "stage5_shapes.parquet")
+    if os.path.exists(s5_path):
+        s5 = pd.read_parquet(s5_path)
+        s5["makat"] = s5["makat"].astype(str)
+        df = df.merge(s5, on="makat", how="left")
+    if "shape" not in df.columns:
+        df["shape"] = "[]"
+    df["shape"] = df["shape"].apply(lambda v: v if isinstance(v, str) else "[]")
+
     if "cities" not in df.columns:
         df["cities"] = [[] for _ in range(len(df))]
     if "stops" not in df.columns:
@@ -386,34 +399,30 @@ def all_cities():
 
 
 
-# Row of compact filter chips, wrapped so it can span the full screen width
+# closed-list options for the central search (cities + line numbers from the data)
+@st.cache_data(ttl=3600)
+def search_options():
+    cities = all_cities()
+    lines = sorted(df_all["line_number"].dropna().astype(str).unique(),
+                   key=lambda s: (len(s), s))
+    return [f"עיר · {c}" for c in cities] + [f"קו · {ln}" for ln in lines]
+
+
+# Filter bar (full-width, fixed at top): compact chips.
+# (The central search lives lower, under the page title — its value is read from
+#  session_state below so filtering can run before that widget is rendered.)
 with st.container(key="filterbar"):
-    cols = st.columns([1.4, 1.0, 1.0, 1.3, 1.1, 1.2, 1.5, 1.4])
+    cols = st.columns([1.4, 1.0, 1.1, 1.3, 1.1, 1.3, 1.5])
     weights, min_trips = render_weights(cols[0])
     sel_ops      = filter_chip(cols[1], "מפעיל",        "operator",     "op")
-    sel_district = filter_chip(cols[2], "מחוז",         "district",     "district",
-                               default_only={"גוש דן"})
+    sel_district = filter_chip(cols[2], "מחוז",         "district",     "district")
     sel_service  = filter_chip(cols[3], "סוג קו שירות", "service_type", "service")
     sel_partic   = filter_chip(cols[4], "ייחודיות",     "particular",   "partic")
     sel_bustype  = filter_chip(cols[5], "סוג אוטובוס",  "bus_type",     "bustype")
 
-    # City / neighbourhood filter
-    city_list = all_cities()
-    n_geo = len(st.session_state.get("sel_cities", [])) + (1 if st.session_state.get("geo_text") else 0)
-    geo_badge = str(n_geo) if n_geo else "הכל"
-    with cols[6].popover(f"🏙️ עיר/שכונה: {geo_badge}", use_container_width=False):
-        sel_cities = st.multiselect(
-            "ערים שהקו עובר בהן", options=city_list, key="sel_cities",
-            placeholder="בחרו עיר/ערים…",
-        )
-        geo_text = st.text_input(
-            "חיפוש שכונה / תחנה / רחוב", key="geo_text",
-            placeholder="לדוגמה: רמת אביב, דיזנגוף…",
-        ).strip()
-
     # Period filter (last chip)
     today = date.today()
-    with cols[7].popover("📅 תקופה", use_container_width=False):
+    with cols[6].popover("📅 תקופה", use_container_width=False):
         date_mode = st.radio(
             "טווח", options=["החודש", "השנה", "מותאם"],
             horizontal=True, key="date_mode", label_visibility="collapsed",
@@ -440,16 +449,19 @@ for col, sel in [("operator", sel_ops), ("district", sel_district),
     if len(sel) < len(options_for(col)):
         df_view = df_view[df_view[col].astype(str).isin(sel)]
 
-# city / neighbourhood filter — route passes if it stops in a selected city,
-# or a stop/city name contains the free-text query
-if sel_cities:
-    want = set(sel_cities)
-    df_view = df_view[df_view["cities"].apply(lambda cs: bool(want & set(cs)))]
-if geo_text:
-    q = geo_text
-    def hits(row):
-        return any(q in c for c in row["cities"]) or any(q in s for s in row["stops"])
-    df_view = df_view[df_view.apply(hits, axis=1)]
+# central search — keep routes matching any selected line number OR city.
+# value comes from session_state (the widget itself is rendered under the title).
+search_sel = st.session_state.get("main_search", [])
+_search_cities, _search_lines = set(), set()
+for _s in search_sel:
+    _kind, _, _val = _s.partition(" · ")
+    (_search_cities if _kind == "עיר" else _search_lines).add(_val)
+if _search_cities or _search_lines:
+    def _match(row):
+        if _search_lines and str(row["line_number"]) in _search_lines:
+            return True
+        return bool(_search_cities & set(row["cities"]))
+    df_view = df_view[df_view.apply(_match, axis=1)]
 
 df_view = df_view[df_view["peak_trips"] >= min_trips]
 
@@ -461,6 +473,15 @@ df_view.index = df_view.index + 1
 # ── main content ──────────────────────────────────────────────────────────────
 st.title("🚌 דירוג קווי אוטובוס — כל הארץ")
 st.markdown(f"**{len(df_view)} קווים** | נתוני GTFS + SIRI + נסועה 2026")
+
+# central search — under the title, full table width (rendered before the empty
+# check so it stays editable even when a search returns no results)
+with st.container(key="searchbox"):
+    st.multiselect(
+        "חיפוש", options=search_options(), key="main_search",
+        label_visibility="collapsed",
+        placeholder="🔍 חיפוש עיר / יישוב / מספר קו…",
+    )
 
 if df_view.empty:
     st.warning("🔍 אין קווים התואמים את הסינון הנוכחי. הרחיבו את הפילטרים או לחצו «בחר הכל».")
@@ -538,15 +559,16 @@ ordered = [c for c in display_cols if c in df_view.columns]
 # drop columns that have no data at all (e.g. % ביצוע before stage 2 runs)
 ordered = [c for c in ordered if not df_view[c].isna().all()]
 show_df = df_view[ordered].rename(columns=display_cols)
-show_df.insert(0, "דירוג", df_view.index.astype(int))
 show_df = show_df.round(2)
+# dedicated first column for the selection checkbox (keeps the קו badge clean)
+show_df.insert(0, " ", "")
 # hidden helper columns for AgGrid: per-operator colour + positional index
 show_df["_color"] = [OP_COLORS.get(o, DEFAULT_OP_COLOR) for o in df_view["operator"]]
 show_df["_idx"] = list(range(len(df_view)))
 
 # ── export to Excel (RTL sheet) ───────────────────────────────────────────────
 def _to_excel(df):
-    out = df.drop(columns=["_color", "_idx"], errors="ignore").copy()
+    out = df.drop(columns=[" ", "_color", "_idx"], errors="ignore").copy()
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xl:
         out.to_excel(xl, index=False, sheet_name="דירוג קווים")
@@ -564,7 +586,7 @@ _badge_js = JsCode(
     "function(p){var c=(p.data&&p.data._color)||'#455a64';"
     "return {backgroundColor:c,color:'#fff',fontWeight:'800',borderRadius:'8px',"
     "textAlign:'center',display:'flex',alignItems:'center',justifyContent:'center',"
-    "margin:'5px 8px',lineHeight:'1'};}"
+    "margin:'5px 4px',lineHeight:'1'};}"
 )
 _score_js = JsCode(
     "function(p){var v=p.value;if(v==null)return{};"
@@ -573,27 +595,38 @@ _score_js = JsCode(
     "else{k=(t-0.5)/0.5;r=255+(26-255)*k;g=235+(152-235)*k;b=110+(80-110)*k;}"
     "return{backgroundColor:'rgb('+(r|0)+','+(g|0)+','+(b|0)+')',color:'#000',fontWeight:'700'};}"
 )
-# columns are fit to the width (no horizontal scroll → avoids the RTL header/body
-# scroll-desync bug); a browser tooltip shows full text for truncated cells.
+# natural column widths + horizontal scroll (no truncation). The key columns
+# (rank, line, makat, cluster, score) are pinned so they're always fully visible.
 _tip = JsCode("function(p){return p.value;}")
 gb = GridOptionsBuilder.from_dataframe(show_df)
-gb.configure_default_column(resizable=True, sortable=True, filter=False,
-                            minWidth=56, cellStyle={"textAlign": "right"},
-                            tooltipValueGetter=_tip)
+# every column is sortable (click header) and filterable (header menu / funnel)
+gb.configure_default_column(resizable=True, sortable=True, filter="agTextColumnFilter",
+                            floatingFilter=False, width=100,
+                            cellStyle={"textAlign": "right"}, tooltipValueGetter=_tip)
 gb.configure_selection("multiple", use_checkbox=True, header_checkbox=True)
 gb.configure_column("_color", hide=True)
 gb.configure_column("_idx", hide=True)
-gb.configure_column("קו", cellStyle=_badge_js, minWidth=70, pinned="right")
-gb.configure_column("דירוג", minWidth=58, type=["numericColumn"], pinned="right")
-gb.configure_column("מפעיל", minWidth=95)
-gb.configure_column("אשכול", minWidth=95)
-gb.configure_column("ציון", cellStyle=_score_js, minWidth=64, pinned="left")
+# dedicated selection-checkbox column (no sort/filter), then pinned right cols
+gb.configure_column(" ", width=44, pinned="right", checkboxSelection=True,
+                    headerCheckboxSelection=True, sortable=False, filter=False)
+gb.configure_column("קו", cellStyle=_badge_js, width=64, pinned="right")
+gb.configure_column("מק״ט", width=90, pinned="right", filter="agNumberColumnFilter")
+gb.configure_column("אשכול", width=160, pinned="right")
+# pinned left (always visible): score
+gb.configure_column("ציון", cellStyle=_score_js, width=84, pinned="left",
+                    filter="agNumberColumnFilter", sort="desc")
+gb.configure_column("מפעיל", width=130)
+# numeric columns get a number filter (>, <, range) instead of text
+for _nc in ["Headway (דק')", "מהירות (קמ״ש)", "אורך (ק״מ)", "Circuity",
+            "נוסעים/ק״מ", "נוסעים/נסיעה"]:
+    if _nc in show_df.columns:
+        gb.configure_column(_nc, filter="agNumberColumnFilter")
 gb.configure_grid_options(enableRtl=True, rowHeight=34, enableBrowserTooltips=True)
 grid = AgGrid(
     show_df, gridOptions=gb.build(),
     update_mode=GridUpdateMode.SELECTION_CHANGED,
     allow_unsafe_jscode=True, height=600, theme="alpine",
-    fit_columns_on_grid_load=True, key="ranking_grid",
+    fit_columns_on_grid_load=False, key="ranking_grid",
 )
 
 # export button — below the table, aligned to its left edge (RTL → leftmost column)
@@ -792,8 +825,6 @@ use_op_colors = mopt3.checkbox("צבע מפעיל", value=False,
 
 fmap = folium.Map(location=[32.08, 34.80], zoom_start=11, tiles="CartoDB positron",
                   control_scale=True)
-Geocoder(collapsed=False, add_marker=True,
-         placeholder="חיפוש עיר / שכונה / כתובת…").add_to(fmap)
 
 # Neutralise Leaflet's default div-icon box so route-number badges keep their
 # coloured background and never wrap to multiple lines.
@@ -866,9 +897,12 @@ for order, (_, r) in enumerate(sel_rows.iterrows()):
         continue
     color = (OP_COLORS.get(r["operator"], DEFAULT_OP_COLOR) if use_op_colors
              else ROUTE_PALETTE[order % len(ROUTE_PALETTE)])
-    pts = [[p[0], p[1]] for p in geo]
-    all_pts += pts
-    folium.PolyLine(pts, color=color, weight=5, opacity=0.9,
+    # road-following shape (OSRM); fall back to straight stop line if missing
+    road = parse_geo(r.get("shape"))
+    line_pts = [[p[0], p[1]] for p in road] if len(road) >= 2 \
+        else [[p[0], p[1]] for p in geo]
+    all_pts += line_pts
+    folium.PolyLine(line_pts, color=color, weight=5, opacity=0.9,
                     tooltip=route_tooltip(r, color)).add_to(fmap)
     if show_stops:
         for i, p in enumerate(geo):
@@ -879,10 +913,10 @@ for order, (_, r) in enumerate(sel_rows.iterrows()):
                 fill_color=color if edge else "#ffffff",
                 fill_opacity=1, weight=2, tooltip=f"{p[2]} · {p[3]}",
             ).add_to(fmap)
-    # route-number badges: midpoint + both ends
-    number_badge(pts[len(pts) // 2], r["line_number"], color)
-    number_badge(pts[0],  r["line_number"], color)
-    number_badge(pts[-1], r["line_number"], color)
+    # route-number badges: endpoints at the terminal stops, one at the path midpoint
+    number_badge([geo[0][0], geo[0][1]],   r["line_number"], color)
+    number_badge([geo[-1][0], geo[-1][1]], r["line_number"], color)
+    number_badge(line_pts[len(line_pts) // 2], r["line_number"], color)
     drawn += 1
 
 if all_pts:
