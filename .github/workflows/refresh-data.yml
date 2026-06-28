@@ -1,0 +1,63 @@
+name: Refresh GTFS data
+
+# Weekly, lightweight refresh of the planned-schedule data (step1 + step6).
+# Ridership (step3), stops (step4) and road shapes (step5) change slowly and/or
+# hit the public OSRM demo server, so they run ONLY on a manual full refresh.
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'        # Mondays 04:00 UTC (07:00 Israel)
+  workflow_dispatch:
+    inputs:
+      full_refresh:
+        description: 'Also refresh ridership (3), stops (4) and road shapes (5) — slow, hits OSRM'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write               # needed to push the regenerated parquet files
+
+concurrency:
+  group: refresh-data
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pipeline dependencies
+        run: pip install pandas numpy pyarrow requests
+
+      # Manual full refresh only: slow stages that hit data.gov.il + OSRM.
+      # Order matters: stage3 → stage4 → stage5 (each feeds the next / step1).
+      - name: Full refresh (ridership + stops + road shapes)
+        if: ${{ github.event.inputs.full_refresh == 'true' }}
+        run: |
+          python step3_ridership.py
+          python step4_stops.py
+          python step5_shapes.py
+
+      # Always: regenerate the planned-schedule metrics and frequencies.
+      - name: Weekly refresh (GTFS schedule + frequency)
+        run: |
+          python step1_gtfs.py
+          python step6_frequency.py
+
+      - name: Commit & push if the data changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- '*.parquet'
+          if git diff --cached --quiet; then
+            echo "No data changes — nothing to commit."
+          else
+            git commit -m "chore(data): automated GTFS refresh ($(date -u +%F))"
+            git push
+          fi

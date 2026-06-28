@@ -9,7 +9,7 @@ Output: stage6_frequency.parquet → makat, daily_trips_dir, headway_offpeak
 
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -19,7 +19,8 @@ API = "https://open-bus-stride-api.hasadna.org.il"
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "bus-dashboard/1.0"})
 
-REF = "2026-06-16"
+# Monday of the current week → re-runs always use a fresh service day.
+REF = (date.today() - timedelta(days=date.today().weekday())).isoformat()
 # full service day in UTC (≈ 04:00–24:00 IST, IST = UTC+3)
 DAY_FROM = f"{REF}T01:00:00+00:00"
 DAY_TO   = f"{REF}T21:00:00+00:00"

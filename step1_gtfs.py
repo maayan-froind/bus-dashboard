@@ -32,14 +32,36 @@ GUSH_DAN_OPERATORS = {
     51: "ירושלים-צור באהר איחוד",
 }
 
-# Reference weekday (Monday, summer 2026)
-REF_DATE = "2026-06-16"
+# Reference weekday = Monday of the current week (so re-runs always pull a
+# fresh, representative service day instead of a frozen 2026 date).
+from datetime import date as _date
 
-# Peak windows in UTC (Israel Summer Time = UTC+3)
-# REF_DATE = 2026-06-16 (Monday). start_time in API is UTC.
+try:
+    from zoneinfo import ZoneInfo
+    _IL_TZ = ZoneInfo("Asia/Jerusalem")          # handles IST/IDT (UTC+2/+3)
+except Exception:                                # pragma: no cover
+    _IL_TZ = timezone(timedelta(hours=3))        # fallback: assume summer time
+
+
+def _recent_monday():
+    t = _date.today()
+    return t - timedelta(days=t.weekday())       # weekday(): Mon=0 … Sun=6
+
+
+def _utc_window(d, h_from, h_to):
+    """Local (IST/IDT) hour range on date d → (utc_from_iso, utc_to_iso)."""
+    a = datetime(d.year, d.month, d.day, h_from, tzinfo=_IL_TZ).astimezone(timezone.utc)
+    b = datetime(d.year, d.month, d.day, h_to, tzinfo=_IL_TZ).astimezone(timezone.utc)
+    return (a.isoformat(), b.isoformat())
+
+
+_REF = _recent_monday()
+REF_DATE = _REF.isoformat()
+
+# Peak windows, converted from local Israel time → UTC for the API.
 PEAK_WINDOWS_UTC = [
-    ("2026-06-16T04:00:00+00:00", "2026-06-16T06:00:00+00:00"),  # 07:00-09:00 IST
-    ("2026-06-16T13:00:00+00:00", "2026-06-16T16:00:00+00:00"),  # 16:00-19:00 IST
+    _utc_window(_REF, 7, 9),    # morning peak 07:00–09:00 local
+    _utc_window(_REF, 16, 19),  # evening peak 16:00–19:00 local
 ]
 LONG_ROUTE_KM = 10.0
 MAX_WORKERS   = 8
