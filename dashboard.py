@@ -539,6 +539,12 @@ if df_view.empty:
     st.warning("🔍 אין קווים התואמים את הסינון הנוכחי. הרחיבו את הפילטרים או לחצו «בחר הכל».")
     st.stop()
 
+# choose which ranking to show: by bus line (default) or by stop code
+view_mode = st.radio(
+    "תצוגת דירוג", ["🚌 דירוג קווים", "🚏 דירוג תחנות"],
+    horizontal=True, label_visibility="collapsed", key="view_mode",
+)
+
 # Layout: all page content lives in the right 50% (CSS pushes .block-container
 # right); the folium map is CSS-pinned to the left 50% at full viewport height.
 
@@ -582,6 +588,224 @@ def style_line_badge(row):
             "text-align:center;"
         )
     return styles
+
+
+# ── shared helpers (used by both the line view and the stop view) ─────────────
+def _fmt(v, nd=2, suffix=""):
+    if v is None or (isinstance(v, float) and pd.isna(v)) or v == "" or str(v) == "nan":
+        return "—"
+    if isinstance(v, (int, float, np.floating, np.integer)) and not isinstance(v, bool):
+        return f"{v:,.{nd}f}{suffix}"
+    return f"{v}{suffix}"
+
+
+def render_map(map_rows, active_stops, key_suffix, *, fullscreen=False,
+               show_stops_default=True):
+    """Draw the routes in map_rows + a teardrop pin for each stop code in
+    active_stops. Shared by the line ranking and the stop ranking views."""
+    st.subheader("🗺️ מפה")
+
+    def parse_geo(s):
+        try:
+            return json.loads(s) if isinstance(s, str) else []
+        except Exception:
+            return []
+
+    # distinct colour palette so several routes are easy to tell apart
+    palette = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
+               "#008080", "#9a6324", "#800000", "#000075", "#e07b0a",
+               "#46c2c2", "#bc3f8e"]
+
+    mopt1, mopt2, mopt3 = st.columns(3)
+    show_all = mopt1.checkbox("כל המסוננים", value=False,
+                              help="ציור קל של מסלולי כל הקווים שעברו את הסינון (עד 80)")
+    show_stops = mopt2.checkbox("תחנות", value=show_stops_default)
+    use_op_colors = mopt3.checkbox("צבע מפעיל", value=False,
+                                   help="כבוי = צבע ייחודי לכל קו; דלוק = צבע המפעיל (Kavnav)")
+
+    fmap = folium.Map(location=[32.08, 34.80], zoom_start=11, tiles="CartoDB positron",
+                      control_scale=True)
+    fmap.get_root().header.add_child(folium.Element(
+        "<style>"
+        ".routebadge{background:transparent !important;border:none !important;"
+        "width:auto !important;height:auto !important;overflow:visible !important;}"
+        ".routebadge .rb{display:inline-block;white-space:nowrap;color:#fff;"
+        "font-weight:800;font-size:12px;line-height:1.2;padding:3px 8px;"
+        "border-radius:9px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.55);"
+        "transform:translate(-50%,-50%);}"
+        ".stoppin{background:transparent !important;border:none !important;}"
+        ".stoppin .pin{width:34px;height:34px;border-radius:50% 50% 50% 0;"
+        "background:#d32f2f;border:3px solid #fff;transform:rotate(-45deg);"
+        "box-shadow:0 3px 8px rgba(0,0,0,.5);display:flex;align-items:center;"
+        "justify-content:center;}"
+        ".stoppin .pin span{transform:rotate(45deg);font-size:16px;line-height:1;}"
+        "</style>"
+    ))
+
+    if show_all:
+        for _, r in df_view.head(80).iterrows():
+            g = parse_geo(r.get("geo"))
+            if len(g) >= 2:
+                folium.PolyLine([[p[0], p[1]] for p in g],
+                                color=OP_COLORS.get(r["operator"], DEFAULT_OP_COLOR),
+                                weight=2, opacity=0.2).add_to(fmap)
+
+    def number_badge(latlon, num, color):
+        folium.Marker(latlon, icon=folium.DivIcon(
+            class_name="routebadge", icon_size=(0, 0), icon_anchor=(0, 0),
+            html=f"<span class='rb' style='background:{color};'>{num}</span>",
+        )).add_to(fmap)
+
+    def route_tooltip(r, color):
+        def row(lbl, val):
+            return (f"<tr><td style='color:#5f6368;padding:1px 6px;text-align:right'>{lbl}</td>"
+                    f"<td style='font-weight:600;padding:1px 6px;text-align:left'>{val}</td></tr>")
+        rt = ""
+        o, d = r.get("origin_city"), r.get("dest_city")
+        if pd.notna(o) and pd.notna(d):
+            rt = f"<div style='color:#5f6368;font-size:11px;margin-bottom:4px'>{o} ⟵ {d}</div>"
+        return folium.Tooltip(
+            f"<div style='direction:rtl;font-family:Heebo,sans-serif;min-width:170px'>"
+            f"<div style='display:flex;align-items:center;gap:6px;margin-bottom:3px'>"
+            f"<span style='background:{color};color:#fff;font-weight:800;padding:1px 8px;"
+            f"border-radius:7px'>{r['line_number']}</span>"
+            f"<span style='font-weight:700'>{r['operator']}</span></div>"
+            f"{rt}"
+            f"<table style='border-collapse:collapse;font-size:12px'>"
+            + row("ציון", _fmt(r.get('ציון סופי')))
+            + row("מק״ט", _fmt(r.get('makat')))
+            + row("Headway (דק')", _fmt(r.get('headway_min')))
+            + row("מהירות (קמ״ש)", _fmt(r.get('AverageSpeed')))
+            + row("אורך (ק״מ)", _fmt(r.get('length_km')))
+            + row("נוסעים/ק״מ", _fmt(r.get('PKM')))
+            + row("סוג שירות", _fmt(r.get('service_type')))
+            + "</table></div>", sticky=True)
+
+    all_pts, drawn = [], 0
+    for order, (_, r) in enumerate(map_rows.iterrows()):
+        geo = parse_geo(r.get("geo"))
+        if len(geo) < 2:
+            continue
+        color = (OP_COLORS.get(r["operator"], DEFAULT_OP_COLOR) if use_op_colors
+                 else palette[order % len(palette)])
+        road = parse_geo(r.get("shape"))
+        line_pts = [[p[0], p[1]] for p in road] if len(road) >= 2 \
+            else [[p[0], p[1]] for p in geo]
+        all_pts += line_pts
+        folium.PolyLine(line_pts, color=color, weight=5, opacity=0.9,
+                        tooltip=route_tooltip(r, color)).add_to(fmap)
+        if show_stops:
+            for i, p in enumerate(geo):
+                edge = i == 0 or i == len(geo) - 1
+                folium.CircleMarker(
+                    [p[0], p[1]], radius=6 if edge else 4, color=color, fill=True,
+                    fill_color=color if edge else "#ffffff", fill_opacity=1,
+                    weight=2, tooltip=f"{p[2]} · {p[3]}").add_to(fmap)
+        number_badge([geo[0][0], geo[0][1]],   r["line_number"], color)
+        number_badge([geo[-1][0], geo[-1][1]], r["line_number"], color)
+        number_badge(line_pts[len(line_pts) // 2], r["line_number"], color)
+        drawn += 1
+
+    # teardrop location pin for each active stop (distinct from route badges)
+    for _c in active_stops:
+        _stp = STOPS_IDX.get(_c)
+        if _stp and _stp["lat"] and _stp["lon"]:
+            latlon = [_stp["lat"], _stp["lon"]]
+            all_pts.append(latlon)
+            _tip = folium.Tooltip(
+                f"<div style='direction:rtl;font-family:Heebo,sans-serif'>"
+                f"<b>🚏 תחנה {_c}</b><br>{_stp['name']}<br>"
+                f"<span style='color:#5f6368'>{_stp['city']} · "
+                f"{len(_stp['makats'])} קווים</span></div>")
+            folium.CircleMarker(latlon, radius=15, color="#d32f2f", weight=2,
+                                fill=True, fill_color="#d32f2f",
+                                fill_opacity=0.15).add_to(fmap)
+            folium.Marker(latlon, icon=folium.DivIcon(
+                class_name="stoppin", icon_size=(34, 46), icon_anchor=(17, 46),
+                html="<div class='pin'><span>🚏</span></div>"),
+                tooltip=_tip, z_index_offset=1000).add_to(fmap)
+
+    if all_pts:
+        lat_s = [p[0] for p in all_pts]; lon_s = [p[1] for p in all_pts]
+        fmap.fit_bounds([[min(lat_s), min(lon_s)], [max(lat_s), max(lon_s)]])
+
+    if active_stops and drawn:
+        nums = "، ".join(str(r["line_number"]) for _, r in map_rows.iterrows())
+        st.caption(f"🚏 תחנה {'، '.join(sorted(active_stops))} · מציג **{drawn}** קווים: {nums}")
+    elif drawn:
+        nums = "، ".join(str(r["line_number"]) for _, r in map_rows.iterrows())
+        st.caption(f"מציג **{drawn}** קווים: {nums} · סמנו עוד שורות בטבלה")
+    else:
+        st.caption("אין נתוני מסלול לקווים שנבחרו.")
+
+    if not fullscreen:
+        st_folium(fmap, use_container_width=True, height=1400,
+                  returned_objects=[], key="route_map_" + key_suffix)
+    st.caption("מקורות: GTFS (משרד התחבורה) · Open Bus Stride API · data.gov.il נסועה Q1-2026")
+
+
+# ── stop ranking view (second table: rank by stop code) ───────────────────────
+if view_mode == "🚏 דירוג תחנות":
+    daily_map = dict(zip(df_view["makat"].astype(str),
+                         df_view["daily_trips"].fillna(0)))
+    allowed = set(daily_map)
+    _rows = []
+    for _code, _info in STOPS_IDX.items():
+        _serv = _info["makats"] & allowed
+        if not _serv:
+            continue
+        _rows.append({
+            "קוד תחנה": _code, "יישוב": _info["city"], "שם תחנה": _info["name"],
+            "מס׳ קווים": len(_serv),
+            "נסיעות ביום": int(round(sum(daily_map.get(m, 0) for m in _serv))),
+        })
+    if not _rows:
+        st.info("אינדקס התחנות אינו זמין עדיין. הריצו «רענון מלא» (step4) כדי לבנות אותו.")
+        st.stop()
+    stop_df = (pd.DataFrame(_rows)
+               .sort_values("נסיעות ביום", ascending=False)
+               .reset_index(drop=True))
+
+    st.subheader("🚏 טבלת דירוג תחנות")
+    st.markdown(f"**{len(stop_df):,} תחנות** · נגזר מהקווים שעברו את הסינון "
+                f"· מיון לפי נסיעות ביום")
+    st.caption("👆 סמנו תחנה כדי לראות אותה ואת הקווים שעוצרים בה על המפה")
+
+    sgb = GridOptionsBuilder.from_dataframe(stop_df)
+    sgb.configure_default_column(resizable=True, sortable=True,
+                                 filter="agNumberColumnFilter", minWidth=90,
+                                 cellStyle={"textAlign": "right"})
+    sgb.configure_selection("single", use_checkbox=False)
+    sgb.configure_column("קוד תחנה", pinned="right", width=110, minWidth=100,
+                         filter="agNumberColumnFilter")
+    sgb.configure_column("יישוב", filter="agTextColumnFilter", minWidth=120)
+    sgb.configure_column("שם תחנה", filter="agTextColumnFilter", minWidth=220)
+    sgb.configure_column("מס׳ קווים", width=110, minWidth=100, sort="desc")
+    sgb.configure_column("נסיעות ביום", width=120, minWidth=110)
+    sgb.configure_grid_options(enableRtl=True, rowHeight=34,
+                               onFirstDataRendered=JsCode("function(p){p.api.sizeColumnsToFit();}"),
+                               onGridSizeChanged=JsCode("function(p){p.api.sizeColumnsToFit();}"))
+    sgrid = AgGrid(stop_df, gridOptions=sgb.build(),
+                   update_mode=GridUpdateMode.SELECTION_CHANGED,
+                   allow_unsafe_jscode=True, height=600, theme="alpine",
+                   fit_columns_on_grid_load=True, key="stop_grid",
+                   custom_css={".ag-header-cell-text": {"font-size": "12px"}})
+
+    _ssel = sgrid.get("selected_rows")
+    _scode = None
+    if isinstance(_ssel, pd.DataFrame) and not _ssel.empty:
+        _scode = str(_ssel.iloc[0]["קוד תחנה"])
+    elif isinstance(_ssel, list) and _ssel:
+        _scode = str(_ssel[0].get("קוד תחנה"))
+    if _scode is None and len(stop_df):
+        _scode = str(stop_df.iloc[0]["קוד תחנה"])
+
+    st.divider()
+    _serving = (df_view[df_view["makat"].astype(str).isin(STOPS_IDX[_scode]["makats"])]
+                if _scode and _scode in STOPS_IDX else df_view.iloc[0:0])
+    render_map(_serving.head(15), {_scode} if _scode else set(),
+               "stop_" + (str(_scode) or "none"), show_stops_default=True)
+    st.stop()
 
 
 # ── KPI summary cards (above the ranking table) ───────────────────────────────
@@ -790,14 +1014,6 @@ sel_rows = df_view.iloc[sel_indices]
 
 
 # ── helpers for the detail panel ──────────────────────────────────────────────
-def _fmt(v, nd=2, suffix=""):
-    if v is None or (isinstance(v, float) and pd.isna(v)) or v == "" or str(v) == "nan":
-        return "—"
-    if isinstance(v, (int, float, np.floating, np.integer)) and not isinstance(v, bool):
-        return f"{v:,.{nd}f}{suffix}"
-    return f"{v}{suffix}"
-
-
 def kv_table(rows):
     """rows: list of (label, value). Renders a compact RTL key-value table."""
     d = pd.DataFrame(rows, columns=["שדה", "ערך"])
@@ -970,181 +1186,10 @@ with tab_score:
 st.divider()
 
 # ── map view (CSS-pinned to the left 50%, full viewport height) ───────────────
-st.subheader("🗺️ מפה")
-
-
-def parse_geo(s):
-    try:
-        return json.loads(s) if isinstance(s, str) else []
-    except Exception:
-        return []
-
-
-# distinct colour palette so several selected routes are easy to tell apart
-ROUTE_PALETTE = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4",
-                 "#008080", "#9a6324", "#800000", "#000075", "#e07b0a",
-                 "#46c2c2", "#bc3f8e"]
-
-mopt1, mopt2, mopt3 = st.columns(3)
-show_all = mopt1.checkbox("כל המסוננים", value=False,
-                          help="ציור קל של מסלולי כל הקווים שעברו את הסינון (עד 80)")
-show_stops = mopt2.checkbox("תחנות", value=(len(sel_indices) == 1))
-use_op_colors = mopt3.checkbox("צבע מפעיל", value=False,
-                               help="כבוי = צבע ייחודי לכל קו; דלוק = צבע המפעיל (Kavnav)")
-
-fmap = folium.Map(location=[32.08, 34.80], zoom_start=11, tiles="CartoDB positron",
-                  control_scale=True)
-
-# Neutralise Leaflet's default div-icon box so route-number badges keep their
-# coloured background and never wrap to multiple lines.
-fmap.get_root().header.add_child(folium.Element(
-    "<style>"
-    ".routebadge{background:transparent !important;border:none !important;"
-    "width:auto !important;height:auto !important;overflow:visible !important;}"
-    ".routebadge .rb{display:inline-block;white-space:nowrap;color:#fff;"
-    "font-weight:800;font-size:12px;line-height:1.2;padding:3px 8px;"
-    "border-radius:9px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.55);"
-    "transform:translate(-50%,-50%);}"
-    # teardrop location pin for a searched stop (distinct from the flat badges)
-    ".stoppin{background:transparent !important;border:none !important;}"
-    ".stoppin .pin{width:34px;height:34px;border-radius:50% 50% 50% 0;"
-    "background:#d32f2f;border:3px solid #fff;transform:rotate(-45deg);"
-    "box-shadow:0 3px 8px rgba(0,0,0,.5);display:flex;align-items:center;"
-    "justify-content:center;}"
-    ".stoppin .pin span{transform:rotate(45deg);font-size:16px;line-height:1;}"
-    "</style>"
-))
-
-# light overlay of all filtered routes
-if show_all:
-    for _, r in df_view.head(80).iterrows():
-        g = parse_geo(r.get("geo"))
-        if len(g) >= 2:
-            folium.PolyLine([[p[0], p[1]] for p in g],
-                            color=OP_COLORS.get(r["operator"], DEFAULT_OP_COLOR),
-                            weight=2, opacity=0.2).add_to(fmap)
-
-
-def number_badge(latlon, num, color):
-    folium.Marker(
-        latlon,
-        icon=folium.DivIcon(
-            class_name="routebadge",
-            icon_size=(0, 0), icon_anchor=(0, 0),
-            html=f"<span class='rb' style='background:{color};'>{num}</span>",
-        ),
-    ).add_to(fmap)
-
-
-def route_tooltip(r, color):
-    """Rich HTML tooltip shown when hovering a route line."""
-    def row(lbl, val):
-        return (f"<tr><td style='color:#5f6368;padding:1px 6px;text-align:right'>{lbl}</td>"
-                f"<td style='font-weight:600;padding:1px 6px;text-align:left'>{val}</td></tr>")
-    rt = ""
-    o, d = r.get("origin_city"), r.get("dest_city")
-    if pd.notna(o) and pd.notna(d):
-        rt = f"<div style='color:#5f6368;font-size:11px;margin-bottom:4px'>{o} ⟵ {d}</div>"
-    return folium.Tooltip(
-        f"<div style='direction:rtl;font-family:Heebo,sans-serif;min-width:170px'>"
-        f"<div style='display:flex;align-items:center;gap:6px;margin-bottom:3px'>"
-        f"<span style='background:{color};color:#fff;font-weight:800;padding:1px 8px;"
-        f"border-radius:7px'>{r['line_number']}</span>"
-        f"<span style='font-weight:700'>{r['operator']}</span></div>"
-        f"{rt}"
-        f"<table style='border-collapse:collapse;font-size:12px'>"
-        + row("ציון", _fmt(r.get('ציון סופי')))
-        + row("מק״ט", _fmt(r.get('makat')))
-        + row("Headway (דק')", _fmt(r.get('headway_min')))
-        + row("מהירות (קמ״ש)", _fmt(r.get('AverageSpeed')))
-        + row("אורך (ק״מ)", _fmt(r.get('length_km')))
-        + row("נוסעים/ק״מ", _fmt(r.get('PKM')))
-        + row("סוג שירות", _fmt(r.get('service_type')))
-        + "</table></div>",
-        sticky=True,
-    )
-
-
-# when searching by stop number, draw all the lines serving that stop (not just
-# the table-selected row) so the stop's lines all appear on the map at once.
-map_rows = df_view.head(15) if _search_stops else sel_rows
-
-all_pts = []
-drawn = 0
-for order, (_, r) in enumerate(map_rows.iterrows()):
-    geo = parse_geo(r.get("geo"))
-    if len(geo) < 2:
-        continue
-    color = (OP_COLORS.get(r["operator"], DEFAULT_OP_COLOR) if use_op_colors
-             else ROUTE_PALETTE[order % len(ROUTE_PALETTE)])
-    # road-following shape (OSRM); fall back to straight stop line if missing
-    road = parse_geo(r.get("shape"))
-    line_pts = [[p[0], p[1]] for p in road] if len(road) >= 2 \
-        else [[p[0], p[1]] for p in geo]
-    all_pts += line_pts
-    folium.PolyLine(line_pts, color=color, weight=5, opacity=0.9,
-                    tooltip=route_tooltip(r, color)).add_to(fmap)
-    if show_stops:
-        for i, p in enumerate(geo):
-            edge = i == 0 or i == len(geo) - 1
-            folium.CircleMarker(
-                [p[0], p[1]], radius=6 if edge else 4,
-                color=color, fill=True,
-                fill_color=color if edge else "#ffffff",
-                fill_opacity=1, weight=2, tooltip=f"{p[2]} · {p[3]}",
-            ).add_to(fmap)
-    # route-number badges: endpoints at the terminal stops, one at the path midpoint
-    number_badge([geo[0][0], geo[0][1]],   r["line_number"], color)
-    number_badge([geo[-1][0], geo[-1][1]], r["line_number"], color)
-    number_badge(line_pts[len(line_pts) // 2], r["line_number"], color)
-    drawn += 1
-
-# searched stops: mark each with a distinct teardrop location pin (clearly
-# different from the flat route-number badges) + a halo so it stands out.
-for _c in _search_stops:
-    _st = STOPS_IDX[_c]
-    if _st["lat"] and _st["lon"]:
-        latlon = [_st["lat"], _st["lon"]]
-        all_pts.append(latlon)
-        _tip = folium.Tooltip(
-            f"<div style='direction:rtl;font-family:Heebo,sans-serif'>"
-            f"<b>🚏 תחנה {_c}</b><br>{_st['name']}<br>"
-            f"<span style='color:#5f6368'>{_st['city']} · "
-            f"{len(_st['makats'])} קווים</span></div>")
-        # soft halo ring to draw the eye to the exact location
-        folium.CircleMarker(latlon, radius=15, color="#d32f2f", weight=2,
-                            fill=True, fill_color="#d32f2f",
-                            fill_opacity=0.15).add_to(fmap)
-        # teardrop pin (CSS), tip anchored exactly on the stop coordinate
-        folium.Marker(
-            latlon,
-            icon=folium.DivIcon(
-                class_name="stoppin", icon_size=(34, 46), icon_anchor=(17, 46),
-                html="<div class='pin'><span>🚏</span></div>",
-            ),
-            tooltip=_tip, z_index_offset=1000,
-        ).add_to(fmap)
-
-if all_pts:
-    lat_s = [p[0] for p in all_pts]; lon_s = [p[1] for p in all_pts]
-    fmap.fit_bounds([[min(lat_s), min(lon_s)], [max(lat_s), max(lon_s)]])
-
-if _search_stops and drawn:
-    nums = "، ".join(str(r["line_number"]) for _, r in map_rows.iterrows())
-    st.caption(f"🚏 תחנה {'، '.join(sorted(_search_stops))} · מציג **{drawn}** קווים: {nums}")
-elif drawn:
-    nums = "، ".join(str(r["line_number"]) for _, r in map_rows.iterrows())
-    st.caption(f"מציג **{drawn}** קווים: {nums} · סמנו עוד שורות בטבלה")
-else:
-    st.caption("אין נתוני מסלול לקווים שנבחרו.")
-# Render the map only when NOT in full-screen mode — a Leaflet map built inside a
-# hidden (display:none) container can't compute size/bounds and ends up zoomed out.
-# Keying the widget on the current selection forces a fresh fit on every change, so
-# the map always re-focuses on the selected route (incl. when leaving full screen).
-if not fullscreen:
-    _map_key = ("route_map_" + "_".join(str(i) for i in sel_indices)
-                + "_s" + "_".join(sorted(_search_stops)))
-    st_folium(fmap, use_container_width=True, height=1400, returned_objects=[],
-              key=_map_key)
-
-st.caption("מקורות: GTFS (משרד התחבורה) · Open Bus Stride API · data.gov.il נסועה Q1-2026")
+render_map(
+    df_view.head(15) if _search_stops else sel_rows,
+    _search_stops,
+    "_".join(str(i) for i in sel_indices) + "_s" + "_".join(sorted(_search_stops)),
+    fullscreen=fullscreen,
+    show_stops_default=(len(sel_indices) == 1),
+)
