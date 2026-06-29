@@ -199,7 +199,8 @@ st.markdown(
 
 _STAGE_FILES = ("stage1_gtfs.parquet", "stage3_ridership.parquet",
                 "stage4_stops.parquet", "stage5_shapes.parquet",
-                "stage6_frequency.parquet", "stage2_siri.parquet")
+                "stage6_frequency.parquet", "stage2_siri.parquet",
+                "stage7_stops_index.parquet")
 
 
 def _data_version():
@@ -437,6 +438,28 @@ def search_options():
     return [f"עיר · {c}" for c in cities] + [f"קו · {ln}" for ln in lines]
 
 
+# stop-code index (stage7): public stop number → serving lines (makats) + location.
+# ~28k stops is too many for a dropdown, so the user TYPES a stop number into the
+# same search box (accept_new_options) and we match it here.
+@st.cache_data(ttl=3600)
+def load_stops_index(data_version: float = 0.0):
+    p = os.path.join(os.path.dirname(__file__), "stage7_stops_index.parquet")
+    if not os.path.exists(p):
+        return {}
+    s = pd.read_parquet(p)
+    idx = {}
+    for r in s.itertuples(index=False):
+        mk = r.makats if r.makats is not None else []
+        idx[str(r.code)] = {
+            "makats": {str(m) for m in mk},
+            "lat": r.lat, "lon": r.lon, "name": r.name or "", "city": r.city or "",
+        }
+    return idx
+
+
+STOPS_IDX = load_stops_index(_data_version())
+
+
 # Filter bar (full-width, fixed at top): compact chips.
 # (The central search lives lower, under the page title — its value is read from
 #  session_state below so filtering can run before that widget is rendered.)
@@ -462,16 +485,29 @@ for col, sel in [("operator", sel_ops), ("district", sel_district),
     if len(sel) < len(options_for(col)):
         df_view = df_view[df_view[col].astype(str).isin(sel)]
 
-# central search — keep routes matching any selected line number OR city.
+# central search — keep routes matching any selected city / line / stop number.
 # value comes from session_state (the widget itself is rendered under the title).
+# city & line come as "עיר · X" / "קו · X" options; a bare typed number is a stop
+# code (accept_new_options) matched against the stop index.
 search_sel = st.session_state.get("main_search", [])
-_search_cities, _search_lines = set(), set()
+_search_cities, _search_lines, _search_stops = set(), set(), set()
 for _s in search_sel:
-    _kind, _, _val = _s.partition(" · ")
-    (_search_cities if _kind == "עיר" else _search_lines).add(_val)
-if _search_cities or _search_lines:
+    _kind, _sep, _val = _s.partition(" · ")
+    if _sep and _kind == "עיר":
+        _search_cities.add(_val)
+    elif _sep and _kind == "קו":
+        _search_lines.add(_val)
+    elif _s.strip().isdigit() and _s.strip() in STOPS_IDX:
+        _search_stops.add(_s.strip())
+# union of makats serving any searched stop
+_stop_makats = set()
+for _c in _search_stops:
+    _stop_makats |= STOPS_IDX[_c]["makats"]
+if _search_cities or _search_lines or _search_stops:
     def _match(row):
         if _search_lines and str(row["line_number"]) in _search_lines:
+            return True
+        if _stop_makats and str(row["makat"]) in _stop_makats:
             return True
         return bool(_search_cities & set(row["cities"]))
     df_view = df_view[df_view.apply(_match, axis=1)]
@@ -492,9 +528,12 @@ st.markdown(f"**{len(df_view)} קווים** | נתוני GTFS + SIRI + נסוע�
 with st.container(key="searchbox"):
     st.multiselect(
         "חיפוש", options=search_options(), key="main_search",
-        label_visibility="collapsed",
-        placeholder="🔍 חיפוש עיר / יישוב / מספר קו…",
+        label_visibility="collapsed", accept_new_options=True,
+        placeholder="🔍 עיר / יישוב / קו (מהרשימה) · או הקלידו מספר תחנה…",
     )
+    if _search_stops:
+        _names = "، ".join(f"{c} ({STOPS_IDX[c]['name']})" for c in sorted(_search_stops))
+        st.caption(f"🚏 תחנה {_names} — {len(_stop_makats)} קווים עוצרים בה")
 
 if df_view.empty:
     st.warning("🔍 אין קווים התואמים את הסינון הנוכחי. הרחיבו את הפילטרים או לחצו «בחר הכל».")
@@ -1019,9 +1058,13 @@ def route_tooltip(r, color):
     )
 
 
+# when searching by stop number, draw all the lines serving that stop (not just
+# the table-selected row) so the stop's lines all appear on the map at once.
+map_rows = df_view.head(15) if _search_stops else sel_rows
+
 all_pts = []
 drawn = 0
-for order, (_, r) in enumerate(sel_rows.iterrows()):
+for order, (_, r) in enumerate(map_rows.iterrows()):
     geo = parse_geo(r.get("geo"))
     if len(geo) < 2:
         continue
@@ -1049,12 +1092,34 @@ for order, (_, r) in enumerate(sel_rows.iterrows()):
     number_badge(line_pts[len(line_pts) // 2], r["line_number"], color)
     drawn += 1
 
+# searched stops: drop a prominent marker at each stop location + focus there
+for _c in _search_stops:
+    _st = STOPS_IDX[_c]
+    if _st["lat"] and _st["lon"]:
+        all_pts.append([_st["lat"], _st["lon"]])
+        folium.Marker(
+            [_st["lat"], _st["lon"]],
+            icon=folium.DivIcon(
+                class_name="routebadge", icon_size=(0, 0), icon_anchor=(0, 0),
+                html=(f"<span class='rb' style='background:#d32f2f;font-size:13px;"
+                      f"padding:4px 9px;'>🚏 {_c}</span>"),
+            ),
+            tooltip=folium.Tooltip(
+                f"<div style='direction:rtl;font-family:Heebo,sans-serif'>"
+                f"<b>תחנה {_c}</b><br>{_st['name']}<br>"
+                f"<span style='color:#5f6368'>{_st['city']} · "
+                f"{len(_st['makats'])} קווים</span></div>"),
+        ).add_to(fmap)
+
 if all_pts:
     lat_s = [p[0] for p in all_pts]; lon_s = [p[1] for p in all_pts]
     fmap.fit_bounds([[min(lat_s), min(lon_s)], [max(lat_s), max(lon_s)]])
 
-if drawn:
-    nums = "، ".join(str(r["line_number"]) for _, r in sel_rows.iterrows())
+if _search_stops and drawn:
+    nums = "، ".join(str(r["line_number"]) for _, r in map_rows.iterrows())
+    st.caption(f"🚏 תחנה {'، '.join(sorted(_search_stops))} · מציג **{drawn}** קווים: {nums}")
+elif drawn:
+    nums = "، ".join(str(r["line_number"]) for _, r in map_rows.iterrows())
     st.caption(f"מציג **{drawn}** קווים: {nums} · סמנו עוד שורות בטבלה")
 else:
     st.caption("אין נתוני מסלול לקווים שנבחרו.")
@@ -1063,7 +1128,8 @@ else:
 # Keying the widget on the current selection forces a fresh fit on every change, so
 # the map always re-focuses on the selected route (incl. when leaving full screen).
 if not fullscreen:
-    _map_key = "route_map_" + "_".join(str(i) for i in sel_indices)
+    _map_key = ("route_map_" + "_".join(str(i) for i in sel_indices)
+                + "_s" + "_".join(sorted(_search_stops)))
     st_folium(fmap, use_container_width=True, height=1400, returned_objects=[],
               key=_map_key)
 
