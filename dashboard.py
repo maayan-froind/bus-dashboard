@@ -202,7 +202,7 @@ st.markdown(
 _STAGE_FILES = ("stage1_gtfs.parquet", "stage3_ridership.parquet",
                 "stage4_stops.parquet", "stage5_shapes.parquet",
                 "stage6_frequency.parquet", "stage2_siri.parquet",
-                "stage7_stops_index.parquet")
+                "stage7_stops_index.parquet", "stage8_validations.parquet")
 
 
 def _data_version():
@@ -455,7 +455,18 @@ def load_stops_index(data_version: float = 0.0):
         idx[str(r.code)] = {
             "makats": {str(m) for m in mk},
             "lat": r.lat, "lon": r.lon, "name": r.name or "", "city": r.city or "",
+            "taps_daily": None, "taps_total": None, "taps_peak": None, "taps_offpeak": None,
         }
+    # merge real per-stop validations (boardings) — stage8, joined by stop code
+    vp = os.path.join(os.path.dirname(__file__), "stage8_validations.parquet")
+    if os.path.exists(vp):
+        for r in pd.read_parquet(vp).itertuples(index=False):
+            e = idx.get(str(r.code))
+            if e:
+                e["taps_daily"] = float(r.taps_daily_avg)
+                e["taps_total"] = float(r.taps_total)
+                e["taps_peak"] = float(r.taps_peak)
+                e["taps_offpeak"] = float(r.taps_offpeak)
     return idx
 
 
@@ -632,12 +643,18 @@ def render_stop_page(code):
         f"<span style='font-size:1.5rem;font-weight:700'>{info['name']}</span>"
         f"<span style='color:#5f6368;font-size:1.05rem'>{info['city']}</span></div>",
         unsafe_allow_html=True)
-    st.caption("מקור: GTFS (משרד התחבורה) · נתוני נסועה ברמת הקו (data.gov.il)")
+    st.caption("מקורות: GTFS (משרד התחבורה) · תיקופי מסלקה לתחנה (data.gov.il)")
     st.divider()
-    k1, k2, k3 = st.columns(3)
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("קווים בתחנה", len(info["makats"]))
     k2.metric("נסיעות ביום (סה״כ)", int(serving["daily_trips"].fillna(0).sum()))
     k3.metric("מפעילים", int(serving["operator"].nunique()))
+    k4.metric("עליות ביום (ממוצע)",
+              f"{info['taps_daily']:,.0f}" if info.get("taps_daily") is not None else "—",
+              help="תיקופי רב-קו בפועל בכל אמצעי הכרטוס · ממוצע יומי 2026")
+    if info.get("taps_total") is not None:
+        st.caption(f"🎫 תיקופים (עליות) — סה״כ 2026: **{info['taps_total']:,.0f}** · "
+                   f"בשעות שיא: {info['taps_peak']:,.0f} · בשעות שפל: {info['taps_offpeak']:,.0f}")
     st.subheader("🗺️ מיקום והקווים")
     _page_map(serving.head(25), stop_latlon=[info["lat"], info["lon"]], key=f"stopmap_{code}")
     st.subheader("🚌 הקווים שעוצרים בתחנה")
@@ -690,7 +707,8 @@ _CHAT_SCHEMA = (
     "  avg_speed_kmh (מהירות מסחרית קמ\"ש), length_km (אורך), circuity (מקדם פיתול),\n"
     "  passengers_per_km, passengers_per_ride, daily_passengers (נוסעים ביום),\n"
     "  num_stations (מס' תחנות), score (ציון 0–100, גבוה=טוב).\n"
-    "• stops — שורה לכל תחנה. עמודות: stop_code (קוד תחנה), stop_name, city, num_lines, lat, lon.\n"
+    "• stops — שורה לכל תחנה. עמודות: stop_code (קוד תחנה), stop_name, city, num_lines, "
+    "boardings_per_day (עליות/תיקופים ממוצע ליום בפועל), lat, lon.\n"
     "• stop_lines — קשר תחנה⇄קו. עמודות: stop_code, makat. הצטרף ל-lines על makat.\n"
     "הערות: line_number אינו ייחודי (אותו מספר קיים בכמה ערים) — השתמש ב-makat לזיהוי; "
     "לחיפוש עיר אפשר cities LIKE '%שם%'."
@@ -737,6 +755,7 @@ def _chat_tables(data_version: float = 0.0):
     for _code, _info in STOPS_IDX.items():
         s_rows.append({"stop_code": _code, "stop_name": _info["name"],
                        "city": _info["city"], "num_lines": len(_info["makats"]),
+                       "boardings_per_day": _info.get("taps_daily"),
                        "lat": _info["lat"], "lon": _info["lon"]})
         for _m in _info["makats"]:
             sl_rows.append({"stop_code": _code, "makat": str(_m)})
@@ -1137,10 +1156,12 @@ if view_mode == "🚏 דירוג תחנות":
         _serv = _info["makats"] & allowed
         if not _serv:
             continue
+        _td = _info.get("taps_daily")
         _rows.append({
             "קוד תחנה": _code, "יישוב": _info["city"], "שם תחנה": _info["name"],
             "מס׳ קווים": len(_serv),
             "נסיעות ביום": int(round(sum(daily_map.get(m, 0) for m in _serv))),
+            "עליות ביום": (round(_td) if _td is not None else None),
         })
     if not _rows:
         st.info("אינדקס התחנות אינו זמין עדיין. הריצו «רענון מלא» (step4) כדי לבנות אותו.")
@@ -1151,7 +1172,7 @@ if view_mode == "🚏 דירוג תחנות":
 
     st.subheader("🚏 טבלת דירוג תחנות")
     st.markdown(f"**{len(stop_df):,} תחנות** · נגזר מהקווים שעברו את הסינון "
-                f"· מיון לפי נסיעות ביום")
+                f"· מיון לפי עליות ביום (תיקופים בפועל)")
     st.caption("👆 סמנו תחנה כדי לראות אותה ואת הקווים שעוצרים בה על המפה")
 
     sgb = GridOptionsBuilder.from_dataframe(stop_df)
@@ -1163,8 +1184,10 @@ if view_mode == "🚏 דירוג תחנות":
                          filter="agNumberColumnFilter")
     sgb.configure_column("יישוב", filter="agTextColumnFilter", minWidth=120)
     sgb.configure_column("שם תחנה", filter="agTextColumnFilter", minWidth=220)
-    sgb.configure_column("מס׳ קווים", width=110, minWidth=100, sort="desc")
-    sgb.configure_column("נסיעות ביום", width=120, minWidth=110)
+    sgb.configure_column("מס׳ קווים", width=104, minWidth=96)
+    sgb.configure_column("נסיעות ביום", width=116, minWidth=108)
+    sgb.configure_column("עליות ביום", width=116, minWidth=108, sort="desc",
+                         headerTooltip="תיקופי רב-קו בפועל · ממוצע יומי 2026")
     sgb.configure_grid_options(enableRtl=True, rowHeight=34,
                                onFirstDataRendered=JsCode("function(p){p.api.sizeColumnsToFit();}"),
                                onGridSizeChanged=JsCode("function(p){p.api.sizeColumnsToFit();}"))
