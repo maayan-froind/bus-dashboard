@@ -44,7 +44,11 @@ except Exception:                                # pragma: no cover
 
 
 def _recent_monday():
-    t = _date.today()
+    # The open-bus-stride API ingests actual ride instances with a ~3-day lag,
+    # so "today" / this week's Monday can return zero rides. Step back a full
+    # week first, then snap to that week's Monday → always a representative
+    # weekday that is safely behind the ingestion frontier (7–13 days old).
+    t = _date.today() - timedelta(days=7)
     return t - timedelta(days=t.weekday())       # weekday(): Mon=0 … Sun=6
 
 

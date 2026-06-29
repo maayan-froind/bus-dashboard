@@ -19,8 +19,10 @@ API = "https://open-bus-stride-api.hasadna.org.il"
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "bus-dashboard/1.0"})
 
-# Monday of the current week → re-runs always use a fresh service day.
-REF = (date.today() - timedelta(days=date.today().weekday())).isoformat()
+# Representative service day: step back a week (past the API's ~3-day ride
+# ingestion lag) then snap to that week's Monday. Must match step1's REF_DATE.
+_ref_base = date.today() - timedelta(days=7)
+REF = (_ref_base - timedelta(days=_ref_base.weekday())).isoformat()
 # full service day in UTC (≈ 04:00–24:00 IST, IST = UTC+3)
 DAY_FROM = f"{REF}T01:00:00+00:00"
 DAY_TO   = f"{REF}T21:00:00+00:00"

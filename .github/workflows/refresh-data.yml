@@ -50,6 +50,22 @@ jobs:
           python step1_gtfs.py
           python step6_frequency.py
 
+      # Guard: if the API returned no rides (e.g. the ingestion frontier moved
+      # past our reference date) the metrics come back empty — fail loudly
+      # instead of committing a hollowed-out dataset over good data.
+      - name: Validate refreshed data is non-empty
+        run: |
+          python - <<'PY'
+          import sys, pandas as pd
+          s1 = pd.read_parquet("stage1_gtfs.parquet")
+          s6 = pd.read_parquet("stage6_frequency.parquet")
+          hw = int(s1["headway_min"].notna().sum())
+          trips = int((s6["daily_trips_dir"] > 0).sum())
+          print(f"non-null headways: {hw} / {len(s1)} | routes with trips: {trips} / {len(s6)}")
+          if hw < 100 or trips < 100:
+              sys.exit("ERROR: refreshed data looks empty — refusing to commit.")
+          PY
+
       - name: Commit & push if the data changed
         run: |
           git config user.name  "github-actions[bot]"
