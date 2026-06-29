@@ -10,6 +10,8 @@ import base64
 from datetime import date, timedelta
 import numpy as np
 import pandas as pd
+import duckdb
+import anthropic
 import plotly.express as px
 import streamlit as st
 import streamlit.components.v1 as components
@@ -460,6 +462,132 @@ def load_stops_index(data_version: float = 0.0):
 STOPS_IDX = load_stops_index(_data_version())
 
 
+# ── "ask the data" chat (text-to-SQL over our data only, via Claude) ──────────
+# Claude never answers from general knowledge: it writes DuckDB SQL against the
+# tables below, we run it read-only, and it answers from the returned rows.
+_CHAT_MODEL = "claude-sonnet-4-6"
+_CHAT_SCHEMA = (
+    "טבלאות DuckDB זמינות (SQL רגיל):\n"
+    "• lines — שורה לכל קו אוטובוס. עמודות:\n"
+    "  line_number (מס' קו, טקסט — לא ייחודי!), operator (מפעיל), makat (מזהה ייחודי),\n"
+    "  district (מחוז), cluster (אשכול), service_type (סוג קו שירות), bus_type,\n"
+    "  origin_city (עיר מוצא), dest_city (עיר יעד), cities (כל הערים שהקו עובר, טקסט מופרד בפסיקים),\n"
+    "  headway_peak_min (מרווח בדקות בשעת שיא), freq_peak_per_hour (תדירות שיא, אוטובוסים לשעה),\n"
+    "  freq_offpeak_per_hour (תדירות שפל), daily_trips (נסיעות ביום לכיוון),\n"
+    "  avg_speed_kmh (מהירות מסחרית קמ\"ש), length_km (אורך), circuity (מקדם פיתול),\n"
+    "  passengers_per_km, passengers_per_ride, daily_passengers (נוסעים ביום),\n"
+    "  num_stations (מס' תחנות), score (ציון 0–100, גבוה=טוב).\n"
+    "• stops — שורה לכל תחנה. עמודות: stop_code (קוד תחנה), stop_name, city, num_lines, lat, lon.\n"
+    "• stop_lines — קשר תחנה⇄קו. עמודות: stop_code, makat. הצטרף ל-lines על makat.\n"
+    "הערות: line_number אינו ייחודי (אותו מספר קיים בכמה ערים) — השתמש ב-makat לזיהוי; "
+    "לחיפוש עיר אפשר cities LIKE '%שם%'."
+)
+_CHAT_SYSTEM = (
+    "אתה עוזר נתונים לדשבורד דירוג קווי אוטובוס בישראל. "
+    "ענה אך ורק על סמך נתונים שמוחזרים מהכלי run_sql — אל תשתמש בידע כללי, בהנחות או "
+    "במספרים שלא הגיעו משאילתה. אם השאלה אינה ניתנת לענייה מהנתונים, אמור זאת במפורש. "
+    "תמיד הרץ SQL לפני שאתה עונה על שאלה עובדתית. ענה בעברית, בקצרה ולעניין, עם מספרים מדויקים. "
+    "השתמש ב-LIMIT סביר. \n\n" + _CHAT_SCHEMA
+)
+_CHAT_TOOLS = [{
+    "name": "run_sql",
+    "description": "מריץ שאילתת SELECT (DuckDB) על נתוני האוטובוסים ומחזיר את התוצאות כ-CSV.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"query": {"type": "string", "description": "שאילתת SELECT אחת"}},
+        "required": ["query"],
+    },
+}]
+
+
+@st.cache_data(ttl=3600)
+def _chat_tables(data_version: float = 0.0):
+    """Clean, SQL-friendly views of our data for the chat (cached per refresh)."""
+    g = lambda c: df_all[c] if c in df_all.columns else np.nan
+    lines = pd.DataFrame({
+        "line_number": df_all["line_number"].astype(str),
+        "operator": df_all["operator"], "makat": df_all["makat"].astype(str),
+        "district": g("district"), "cluster": g("cluster"),
+        "service_type": g("service_type"), "bus_type": g("bus_type"),
+        "origin_city": g("origin_city"), "dest_city": g("dest_city"),
+        "headway_peak_min": g("headway_min"),
+        "freq_peak_per_hour": g("freq_peak"), "freq_offpeak_per_hour": g("freq_offpeak"),
+        "daily_trips": g("daily_trips"), "avg_speed_kmh": g("AverageSpeed"),
+        "length_km": g("length_km"), "circuity": g("circuity"),
+        "passengers_per_km": g("PKM"), "passengers_per_ride": g("avg_pass_ride"),
+        "daily_passengers": g("daily_pass"), "num_stations": g("stations"),
+        "score": compute_score(df_all, DEFAULT_WEIGHTS).round(1),
+    })
+    lines["cities"] = df_all["cities"].apply(
+        lambda v: ", ".join(v) if isinstance(v, (list, np.ndarray)) else "")
+    s_rows, sl_rows = [], []
+    for _code, _info in STOPS_IDX.items():
+        s_rows.append({"stop_code": _code, "stop_name": _info["name"],
+                       "city": _info["city"], "num_lines": len(_info["makats"]),
+                       "lat": _info["lat"], "lon": _info["lon"]})
+        for _m in _info["makats"]:
+            sl_rows.append({"stop_code": _code, "makat": str(_m)})
+    return lines, pd.DataFrame(s_rows), pd.DataFrame(sl_rows)
+
+
+_SQL_FORBIDDEN = ("insert", "update", "delete", "drop", "create", "alter", "attach",
+                  "copy", "pragma", "install", "load", "read_parquet", "read_csv",
+                  "read_json", "glob", "export", "call")
+
+
+def _run_sql(con, query):
+    q = (query or "").strip().rstrip(";")
+    low = q.lower()
+    if not (low.startswith("select") or low.startswith("with")):
+        return "ERROR: רק שאילתות SELECT מותרות."
+    if any(tok in low for tok in _SQL_FORBIDDEN):
+        return "ERROR: מותרות רק שאילתות קריאה (SELECT) על הטבלאות הקיימות."
+    try:
+        res = con.execute(q).df()
+    except Exception as e:
+        return f"SQL ERROR: {e}"
+    if len(res) > 80:
+        res = res.head(80)
+    return res.to_csv(index=False) if len(res) else "(אין שורות תואמות)"
+
+
+def ask_data(question, history):
+    """Run one chat turn grounded only in our data. Returns the answer text."""
+    try:
+        key = st.secrets["ANTHROPIC_API_KEY"]          # raises if no secrets file
+    except Exception:
+        key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return ("⚠️ לא הוגדר מפתח **ANTHROPIC_API_KEY**. הוסיפו אותו ל-`.streamlit/secrets.toml` "
+                "(מקומית) או ב-Settings → Secrets ב-Streamlit Cloud, ואז רעננו.")
+    client = anthropic.Anthropic(api_key=key)
+    lines, stops, stop_lines = _chat_tables(_data_version())
+    con = duckdb.connect()
+    con.register("lines", lines); con.register("stops", stops); con.register("stop_lines", stop_lines)
+    messages = [{"role": m["role"], "content": m["content"]} for m in history]
+    messages.append({"role": "user", "content": question})
+    try:
+        for _ in range(6):
+            resp = client.messages.create(
+                model=_CHAT_MODEL, max_tokens=1500, system=_CHAT_SYSTEM,
+                tools=_CHAT_TOOLS, messages=messages)
+            if resp.stop_reason == "tool_use":
+                messages.append({"role": "assistant", "content": resp.content})
+                results = []
+                for b in resp.content:
+                    if b.type == "tool_use":
+                        results.append({"type": "tool_result", "tool_use_id": b.id,
+                                        "content": _run_sql(con, b.input.get("query", ""))})
+                messages.append({"role": "user", "content": results})
+                continue
+            return "".join(b.text for b in resp.content if b.type == "text") or "—"
+        return "לא הצלחתי לסיים את התשובה. נסו לנסח מחדש."
+    except anthropic.APIError as e:
+        return f"שגיאת API: {getattr(e, 'message', str(e))}"
+    finally:
+        con.close()
+
+
 # Filter bar (full-width, fixed at top): compact chips.
 # (The central search lives lower, under the page title — its value is read from
 #  session_state below so filtering can run before that widget is rendered.)
@@ -534,6 +662,31 @@ with st.container(key="searchbox"):
     if _search_stops:
         _names = "، ".join(f"{c} ({STOPS_IDX[c]['name']})" for c in sorted(_search_stops))
         st.caption(f"🚏 תחנה {_names} — {len(_stop_makats)} קווים עוצרים בה")
+
+# ── free-text chat over the data (answers grounded only in our datasets) ──────
+with st.expander("💬 שאל את הנתונים בשפה חופשית"):
+    st.caption("שאלו על קווים/תחנות/מפעילים. התשובות מבוססות **רק** על הנתונים שחולצו "
+               "מהמאגרים (לא ידע כללי). דוגמאות: «איזה קו עם הציון הכי גבוה בתל אביב?», "
+               "«כמה קווים עוצרים בתחנה 21472?», «מה ה-headway הממוצע של אגד?»")
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    if st.session_state.chat_history:
+        _cc1, _cc2 = st.columns([5, 1])
+        if _cc2.button("🗑️ נקה", key="chat_clear", use_container_width=True):
+            st.session_state.chat_history = []
+            st.rerun()
+    for _m in st.session_state.chat_history:
+        with st.chat_message("user" if _m["role"] == "user" else "assistant"):
+            st.markdown(_m["content"] if isinstance(_m["content"], str) else "…")
+    if _q := st.chat_input("שאלו שאלה על הנתונים…", key="chat_in"):
+        with st.chat_message("user"):
+            st.markdown(_q)
+        with st.chat_message("assistant"):
+            with st.spinner("שואל את הנתונים…"):
+                _ans = ask_data(_q, st.session_state.chat_history)
+            st.markdown(_ans)
+        st.session_state.chat_history.append({"role": "user", "content": _q})
+        st.session_state.chat_history.append({"role": "assistant", "content": _ans})
 
 if df_view.empty:
     st.warning("🔍 אין קווים התואמים את הסינון הנוכחי. הרחיבו את הפילטרים או לחצו «בחר הכל».")
