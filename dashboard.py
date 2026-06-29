@@ -666,21 +666,46 @@ with st.container(key="searchbox"):
 # ── floating chat widget (FAB → docked chat panel, grounded in our data) ──────
 st.markdown(
     "<style>"
-    ".st-key-chatfab{position:fixed !important;bottom:20px;left:20px;z-index:1200;width:auto !important;}"
-    ".st-key-chatfab button{width:60px !important;height:60px !important;min-height:60px !important;"
-    "border-radius:50% !important;font-size:1.6rem !important;padding:0 !important;"
-    "box-shadow:0 6px 18px rgba(26,115,232,.45) !important;}"
-    ".st-key-chatpanel{position:fixed !important;bottom:92px;left:20px;width:400px;max-width:92vw;"
+    "@keyframes lmfab{0%{box-shadow:0 0 0 0 rgba(26,115,232,.55)}"
+    "70%{box-shadow:0 0 0 18px rgba(26,115,232,0)}100%{box-shadow:0 0 0 0 rgba(26,115,232,0)}}"
+    ".st-key-chatfab{position:fixed !important;bottom:22px;left:22px;z-index:1200;width:auto !important;}"
+    ".st-key-chatfab button{width:68px !important;height:68px !important;min-height:68px !important;"
+    "border-radius:50% !important;font-size:2rem !important;padding:0 !important;color:#fff !important;"
+    "border:none !important;background:linear-gradient(135deg,#1a73e8,#1557b0) !important;"
+    "animation:lmfab 2.4s infinite;}"
+    ".st-key-chatfab button:hover{filter:brightness(1.08);}"
+    ".st-key-chatpanel{position:fixed !important;bottom:104px;left:22px;width:500px;max-width:94vw;"
     "z-index:1190;background:var(--md-surface);border:1px solid var(--md-outline);"
-    "border-radius:18px;box-shadow:0 12px 40px rgba(0,0,0,.30);overflow:hidden;padding:0 !important;}"
-    ".st-key-chatpanel .chat-head{background:#182443;color:#fff;font-weight:700;font-size:1rem;"
-    "padding:13px 16px;display:flex;align-items:center;gap:8px;}"
-    ".st-key-chatmsgs{max-height:46vh;overflow-y:auto;padding:10px 12px 4px;}"
-    ".st-key-chatpanel [data-testid='stChatInput']{position:static !important;padding:6px 12px 12px;}"
-    ".st-key-chatpanel [data-testid='stChatMessage']{padding:.35rem .5rem;}"
+    "border-radius:20px;box-shadow:0 16px 48px rgba(0,0,0,.32);overflow:hidden;padding:0 !important;}"
+    ".st-key-chatpanel .chat-head{background:#182443;color:#fff;font-weight:700;font-size:1.18rem;"
+    "padding:16px 18px;}"
+    ".st-key-chatpanel .chat-intro{font-size:1rem;line-height:1.55;color:var(--md-on-surface-var);"
+    "margin:.2rem 0 .7rem;}"
+    ".st-key-chatpanel .chat-chips-label{font-size:.95rem;font-weight:700;"
+    "color:var(--md-on-surface);margin:.1rem 0 .4rem;}"
+    ".st-key-chat_clear{position:absolute !important;top:11px;left:14px;z-index:6;width:auto !important;}"
+    ".st-key-chat_clear button{background:transparent !important;color:#fff !important;border:none !important;"
+    "box-shadow:none !important;padding:2px 7px !important;min-height:auto !important;font-size:1.15rem !important;}"
+    ".st-key-chatmsgs{max-height:56vh;overflow-y:auto;padding:14px 16px 6px;}"
+    ".st-key-chatmsgs .stButton>button{background:#eef3fe !important;color:#1557b0 !important;"
+    "border:1px solid #cfe0fd !important;border-radius:999px !important;font-size:.95rem !important;"
+    "font-weight:500 !important;padding:.5rem .85rem !important;text-align:right !important;"
+    "white-space:normal !important;box-shadow:none !important;margin:.14rem 0;}"
+    ".st-key-chatmsgs .stButton>button:hover{background:#dbe8fd !important;}"
+    ".st-key-chatpanel [data-testid='stChatMessage']{padding:.45rem .4rem;}"
+    ".st-key-chatpanel [data-testid='stChatMessageContent'],"
+    ".st-key-chatpanel [data-testid='stChatMessageContent'] p{font-size:1.04rem !important;line-height:1.55 !important;}"
+    ".st-key-chatpanel [data-testid='stChatInput']{position:static !important;padding:8px 16px 16px;}"
+    ".st-key-chatpanel [data-testid='stChatInput'] textarea{font-size:1.05rem !important;}"
     "</style>",
     unsafe_allow_html=True,
 )
+_CHAT_EXAMPLES = [
+    "איזה קו עם הציון הכי גבוה בתל אביב?",
+    "כמה קווים עוצרים בתחנה 21472?",
+    "מה ה-headway הממוצע של אגד?",
+    "5 הקווים העמוסים ביותר לפי נוסעים ביום",
+]
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "chat_open" not in st.session_state:
@@ -691,24 +716,29 @@ if st.button("✖" if st.session_state.chat_open else "💬", key="chatfab",
     st.session_state.chat_open = not st.session_state.chat_open
     st.rerun()
 if st.session_state.chat_open:
+    _pending = None
     with st.container(key="chatpanel"):
-        _ch1, _ch2 = st.columns([5, 1])
-        _ch1.markdown("<div class='chat-head'>💬 שאל את הנתונים</div>", unsafe_allow_html=True)
-        if _ch2.button("🗑️", key="chat_clear", help="נקה שיחה"):
+        st.markdown("<div class='chat-head'>💬 שאל את הנתונים</div>", unsafe_allow_html=True)
+        if st.button("🗑️", key="chat_clear", help="נקה שיחה"):
             st.session_state.chat_history = []
             st.rerun()
         with st.container(key="chatmsgs"):
             if not st.session_state.chat_history:
-                st.caption("שאלו על קווים, תחנות או מפעילים — בשפה חופשית. התשובות מבוססות "
-                           "**רק** על הנתונים שלנו. למשל: «איזה קו עם הציון הכי גבוה בתל אביב?», "
-                           "«כמה קווים עוצרים בתחנה 21472?», «מה ה-headway הממוצע של אגד?»")
+                st.markdown("<div class='chat-intro'>שאלו בשפה חופשית על קווים, תחנות ומפעילים. "
+                            "התשובות מבוססות <b>רק</b> על הנתונים שחולצו מהמאגרים.</div>",
+                            unsafe_allow_html=True)
+                st.markdown("<div class='chat-chips-label'>נסו לדוגמה:</div>", unsafe_allow_html=True)
+                for _i, _ex in enumerate(_CHAT_EXAMPLES):
+                    if st.button(_ex, key=f"chip{_i}", use_container_width=True):
+                        _pending = _ex
             for _m in st.session_state.chat_history:
                 with st.chat_message("user" if _m["role"] == "user" else "assistant"):
                     st.markdown(_m["content"] if isinstance(_m["content"], str) else "…")
-        if _q := st.chat_input("הקלידו שאלה…", key="chat_in"):
-            st.session_state.chat_history.append({"role": "user", "content": _q})
+        _ask = st.chat_input("הקלידו שאלה…", key="chat_in") or _pending
+        if _ask:
+            st.session_state.chat_history.append({"role": "user", "content": _ask})
             with st.spinner("שואל את הנתונים…"):
-                _ans = ask_data(_q, st.session_state.chat_history[:-1])
+                _ans = ask_data(_ask, st.session_state.chat_history[:-1])
             st.session_state.chat_history.append({"role": "assistant", "content": _ans})
             st.rerun()
 
