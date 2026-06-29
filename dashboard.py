@@ -709,7 +709,7 @@ _CHAT_EXAMPLES = [
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "chat_open" not in st.session_state:
-    st.session_state.chat_open = False
+    st.session_state.chat_open = True          # open on first page load
 # floating action button toggles the panel open/closed
 if st.button("✖" if st.session_state.chat_open else "💬", key="chatfab",
              help="שאל את הנתונים בשפה חופשית"):
