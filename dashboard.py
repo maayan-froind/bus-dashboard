@@ -462,6 +462,219 @@ def load_stops_index(data_version: float = 0.0):
 STOPS_IDX = load_stops_index(_data_version())
 
 
+# ── shared helpers + dedicated line / stop pages ──────────────────────────────
+# Kavnav-style colour per operator (defined early so the dedicated pages can use it)
+OP_COLORS = {
+    "דן": "#0aa0a8", "אגד": "#178a3a", "אגד תעבורה": "#178a3a", "מטרופולין": "#5a3e9e",
+    "אלקטרה אפיקים": "#c2185b", "קווים": "#e07b0a", "סופרבוס": "#1f3a93", "תנופה": "#00838f",
+    "אקסטרה": "#d84315", "אקסטרה ירושלים": "#bf360c", "נתיב אקספרס": "#2e7d32",
+    "דן בדרום": "#0277bd", "דן באר שבע": "#00695c", "ש.א.מ": "#6a1b9a", "גלים": "#0097a7",
+    "בית שמש אקספרס": "#ad1457", "נסיעות ותיירות": "#5d4037", "גי.בי.טורס": "#827717",
+    "מועצה אזורית גולן": "#1565c0", "מועצה אזורית אילות": "#00838f", "כפיר": "#4527a0",
+    "כבל אקספרס": "#283593",
+}
+DEFAULT_OP_COLOR = "#455a64"
+_PAX_SLOTS = ["00:00-03:59", "04:00-05:59", "06:00-08:59", "09:00-11:59",
+              "12:00-14:59", "15:00-18:59", "19:00-23:59"]
+
+
+def _fmt(v, nd=2, suffix=""):
+    if v is None or (isinstance(v, float) and pd.isna(v)) or v == "" or str(v) == "nan":
+        return "—"
+    if isinstance(v, (int, float, np.floating, np.integer)) and not isinstance(v, bool):
+        return f"{v:,.{nd}f}{suffix}"
+    return f"{v}{suffix}"
+
+
+def _pg_geo(s):
+    try:
+        return json.loads(s) if isinstance(s, str) else []
+    except Exception:
+        return []
+
+
+def _kv(pairs):
+    d = pd.DataFrame([(lbl, val) for lbl, val in pairs], columns=["שדה", "ערך"])
+    st.dataframe(d.style.set_properties(**{"text-align": "right", "direction": "rtl"}),
+                 use_container_width=True, hide_index=True)
+
+
+def _page_map(rows, stop_latlon=None, key="pmap"):
+    fmap = folium.Map(location=[32.08, 34.80], zoom_start=12,
+                      tiles="CartoDB positron", control_scale=True)
+    pts = []
+    for _, r in rows.iterrows():
+        road, geo = _pg_geo(r.get("shape")), _pg_geo(r.get("geo"))
+        line = [[p[0], p[1]] for p in road] if len(road) >= 2 \
+            else [[p[0], p[1]] for p in geo]
+        if len(line) < 2:
+            continue
+        pts += line
+        folium.PolyLine(line, color=OP_COLORS.get(r["operator"], DEFAULT_OP_COLOR),
+                        weight=5, opacity=.85,
+                        tooltip=f"{r['line_number']} · {r['operator']}").add_to(fmap)
+    if stop_latlon and stop_latlon[0]:
+        pts.append([stop_latlon[0], stop_latlon[1]])
+        folium.CircleMarker(stop_latlon, radius=10, color="#d32f2f", fill=True,
+                            fill_color="#d32f2f", fill_opacity=.9, weight=2).add_to(fmap)
+    if pts:
+        la = [p[0] for p in pts]; lo = [p[1] for p in pts]
+        fmap.fit_bounds([[min(la), min(lo)], [max(la), max(lo)]])
+    st_folium(fmap, use_container_width=True, height=440, returned_objects=[], key=key)
+
+
+def _pax_profile_chart(pj):
+    try:
+        prof = json.loads(pj) if isinstance(pj, str) else {}
+    except Exception:
+        prof = {}
+    rows = [{"רצועת שעות": s, "סוג יום": d, "נוסעים לנסיעה": v}
+            for d, slots in prof.items() for s, v in slots.items() if v is not None]
+    if not rows:
+        st.caption("אין נתוני פרופיל נוסעים לקו זה.")
+        return
+    fig = px.bar(pd.DataFrame(rows), x="רצועת שעות", y="נוסעים לנסיעה", color="סוג יום",
+                 barmode="group", category_orders={"רצועת שעות": _PAX_SLOTS},
+                 color_discrete_map={"ימי חול": "#1a73e8", "שישי": "#e07b0a", "שבת": "#34a853"})
+    fig.update_layout(height=320, font=dict(family="Heebo, sans-serif", size=12),
+                      xaxis=dict(autorange="reversed"), legend=dict(orientation="h"),
+                      plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                      margin=dict(t=10, b=10, l=10, r=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_line_page(makat):
+    if st.button("← חזרה לדשבורד", key="back_line"):
+        st.session_state.page = None
+        st.rerun()
+    sub = df_all[df_all["makat"].astype(str) == str(makat)]
+    if sub.empty:
+        st.error("הקו לא נמצא במאגר.")
+        return
+    r = sub.iloc[0]
+    color = OP_COLORS.get(r["operator"], DEFAULT_OP_COLOR)
+    sc = compute_score(df_all, DEFAULT_WEIGHTS).loc[r.name]
+    st.markdown(
+        f"<div style='direction:rtl;display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:.3rem 0'>"
+        f"<span style='background:{color};color:#fff;font-weight:800;font-size:1.7rem;"
+        f"padding:6px 18px;border-radius:13px'>{r['line_number']}</span>"
+        f"<span style='font-size:1.5rem;font-weight:700'>{r['operator']}</span>"
+        f"<span style='color:#5f6368;font-size:1.05rem'>{_fmt(r.get('origin_city'))} ⟵ {_fmt(r.get('dest_city'))}</span>"
+        f"<span style='margin-right:auto;background:#eef3fe;color:#1557b0;font-weight:800;"
+        f"font-size:1.1rem;padding:7px 16px;border-radius:11px'>ציון {sc:.0f}</span></div>",
+        unsafe_allow_html=True)
+    st.caption(f"מק״ט {r['makat']} · מקורות: GTFS (משרד התחבורה) + נסועה data.gov.il")
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("🪪 זיהוי")
+        _kv([("מק״ט", r["makat"]), ("מס׳ קו", r["line_number"]), ("מפעיל", r["operator"]),
+             ("מחוז", _fmt(r.get("district"))), ("אשכול", _fmt(r.get("cluster"))),
+             ("סוג קו (RouteType)", _fmt(r.get("route_type"))),
+             ("סוג קו שירות", _fmt(r.get("service_type"))),
+             ("ייחודיות", _fmt(r.get("particular"))), ("סוג אוטובוס", _fmt(r.get("bus_type"))),
+             ("גודל אוטובוס", _fmt(r.get("bus_size"))),
+             ("עיר מוצא", _fmt(r.get("origin_city"))), ("עיר יעד", _fmt(r.get("dest_city"))),
+             ("פעיל מאז", _fmt(r.get("operation_since"))),
+             ("מס׳ חלופות", _fmt(r.get("num_alternatives"), 0))])
+        st.subheader("🚌 תפעול ותדירות")
+        _kv([("Headway בשיא (דק׳)", _fmt(r.get("headway_min"))),
+             ("תדירות שיא (אוטובוסים/שעה)", _fmt(r.get("freq_peak"))),
+             ("תדירות שפל (אוטובוסים/שעה)", _fmt(r.get("freq_offpeak"))),
+             ("נסיעות ביום לכיוון", _fmt(r.get("daily_trips"), 0)),
+             ("נסיעות ביום (שלישי)", _fmt(r.get("daily_rides_tue"), 0)),
+             ("נסיעות בשבוע", _fmt(r.get("weekly_rides"), 0)),
+             ("משך נסיעה ממוצע (דק׳)", _fmt(r.get("trip_duration"))),
+             ("מהירות מסחרית (קמ״ש)", _fmt(r.get("AverageSpeed"))),
+             ("אורך מסלול בפועל (ק״מ)", _fmt(r.get("length_km"))),
+             ("אורך קו רשמי (ק״מ)", _fmt(r.get("RouteLength"))),
+             ("Circuity (פיתול)", _fmt(r.get("circuity"))),
+             ("מס׳ תחנות", _fmt(r.get("stations"), 0)),
+             ("תחנות ייחודיות", _fmt(r.get("unique_stations"), 0))])
+    with c2:
+        st.subheader("👥 נסועה (נוסעים)")
+        _kv([("נוסעים ביום", _fmt(r.get("daily_pass"), 0)),
+             ("נוסעים בשבוע", _fmt(r.get("WeeklyPassengers"), 0)),
+             ("ממוצע נוסעים לשבוע", _fmt(r.get("avg_pass_week"), 0)),
+             ("נוסעים לנסיעה", _fmt(r.get("avg_pass_ride"))),
+             ("נוסעים לק״מ (PKM)", _fmt(r.get("PKM"))),
+             ("נסועה שבועית (ק״מ)", _fmt(r.get("WeeklyKM"), 0)),
+             ("עלות תפעול לנוסע (₪)", _fmt(r.get("cost_per_pass")))])
+        st.subheader("📌 המלצות ודירוג (data.gov.il)")
+        _kv([("המלצה", _fmt(r.get("recommendation"))),
+             ("רצועת שיא", _fmt(r.get("peak_period"))),
+             ("ערך שיא בתקופת יום", _fmt(r.get("peak_period_val"))),
+             ("דירוג הפחתה", _fmt(r.get("rank_reduce"), 0)),
+             ("דירוג הוספה", _fmt(r.get("rank_add"), 0))])
+    st.subheader("🕑 פרופיל נוסעים לפי שעה (נוסעים לנסיעה)")
+    _pax_profile_chart(r.get("pax_profile"))
+    st.subheader("🗺️ מסלול")
+    _cities = r.get("cities")
+    if isinstance(_cities, (list, np.ndarray)) and len(_cities):
+        st.caption("ערים במסלול: " + "، ".join(_cities))
+    _page_map(sub, key=f"linemap_{makat}")
+
+
+def render_stop_page(code):
+    if st.button("← חזרה לדשבורד", key="back_stop"):
+        st.session_state.page = None
+        st.rerun()
+    info = STOPS_IDX.get(str(code))
+    if not info:
+        st.error("התחנה לא נמצאה במאגר.")
+        return
+    serving = df_all[df_all["makat"].astype(str).isin(info["makats"])].copy()
+    serving["_score"] = compute_score(df_all, DEFAULT_WEIGHTS).reindex(serving.index)
+    st.markdown(
+        f"<div style='direction:rtl;display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:.3rem 0'>"
+        f"<span style='background:#d32f2f;color:#fff;font-weight:800;font-size:1.5rem;"
+        f"padding:6px 16px;border-radius:13px'>🚏 {code}</span>"
+        f"<span style='font-size:1.5rem;font-weight:700'>{info['name']}</span>"
+        f"<span style='color:#5f6368;font-size:1.05rem'>{info['city']}</span></div>",
+        unsafe_allow_html=True)
+    st.caption("מקור: GTFS (משרד התחבורה) · נתוני נסועה ברמת הקו (data.gov.il)")
+    st.divider()
+    k1, k2, k3 = st.columns(3)
+    k1.metric("קווים בתחנה", len(info["makats"]))
+    k2.metric("נסיעות ביום (סה״כ)", int(serving["daily_trips"].fillna(0).sum()))
+    k3.metric("מפעילים", int(serving["operator"].nunique()))
+    st.subheader("🗺️ מיקום והקווים")
+    _page_map(serving.head(25), stop_latlon=[info["lat"], info["lon"]], key=f"stopmap_{code}")
+    st.subheader("🚌 הקווים שעוצרים בתחנה")
+    _cols = {"line_number": "קו", "operator": "מפעיל", "district": "מחוז",
+             "headway_min": "Headway", "freq_peak": "תדירות שיא",
+             "daily_trips": "נסיעות/יום", "_score": "ציון"}
+    _t = (serving[[c for c in _cols if c in serving.columns]].rename(columns=_cols)
+          .sort_values("ציון", ascending=False).round(1))
+    st.dataframe(_t.style.set_properties(**{"text-align": "right", "direction": "rtl"}),
+                 use_container_width=True, hide_index=True, height=320)
+    _opts = {f"{rr['line_number']} · {rr['operator']} (מק״ט {rr['makat']})": str(rr["makat"])
+             for _, rr in serving.iterrows()}
+    _pick = st.selectbox("פתח עמוד קו מהתחנה הזו:", ["—"] + list(_opts), key=f"stop_to_line_{code}")
+    if _pick != "—":
+        st.session_state.page = ("line", _opts[_pick])
+        st.rerun()
+
+
+# if a dedicated page is open, render it full-width and skip the dashboard
+if st.session_state.get("page"):
+    # neutralise the fixed-left-map layout so the page is full width + inline map
+    st.markdown(
+        "<style>"
+        ".block-container,[data-testid='stMainBlockContainer']"
+        "{margin-left:0 !important;max-width:1120px !important;padding-top:78px !important;}"
+        "[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium'])"
+        "{position:static !important;left:auto !important;top:auto !important;width:auto !important;height:auto !important;}"
+        "[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium'])>div,"
+        "iframe[title='streamlit_folium.st_folium']{width:100% !important;height:440px !important;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    _pg = st.session_state.page
+    (render_line_page if _pg[0] == "line" else render_stop_page)(_pg[1])
+    st.stop()
+
+
 # ── "ask the data" chat (text-to-SQL over our data only, via Claude) ──────────
 # Claude never answers from general knowledge: it writes DuckDB SQL against the
 # tables below, we run it read-only, and it answers from the returned rows.
@@ -756,34 +969,6 @@ view_mode = st.radio(
 # right); the folium map is CSS-pinned to the left 50% at full viewport height.
 
 # ── ranking table ─────────────────────────────────────────────────────────────
-# Kavnav-style colour per operator (the route number cell is coloured accordingly)
-OP_COLORS = {
-    "דן":            "#0aa0a8",   # teal
-    "אגד":           "#178a3a",   # green
-    "אגד תעבורה":    "#178a3a",   # green
-    "מטרופולין":     "#5a3e9e",   # purple
-    "אלקטרה אפיקים": "#c2185b",   # magenta
-    "קווים":         "#e07b0a",   # orange
-    "סופרבוס":       "#1f3a93",   # navy
-    "תנופה":         "#00838f",   # dark cyan
-    "אקסטרה":        "#d84315",   # deep orange
-    "אקסטרה ירושלים": "#bf360c",  # deep orange (darker)
-    "נתיב אקספרס":   "#2e7d32",   # green
-    "דן בדרום":      "#0277bd",   # blue
-    "דן באר שבע":    "#00695c",   # teal-green
-    "ש.א.מ":         "#6a1b9a",   # purple
-    "גלים":          "#0097a7",   # cyan
-    "בית שמש אקספרס": "#ad1457",  # pink
-    "נסיעות ותיירות": "#5d4037",  # brown
-    "גי.בי.טורס":    "#827717",   # olive
-    "מועצה אזורית גולן": "#1565c0", # blue
-    "מועצה אזורית אילות": "#00838f", # cyan
-    "כפיר":          "#4527a0",   # deep purple
-    "כבל אקספרס":    "#283593",   # indigo
-}
-DEFAULT_OP_COLOR = "#455a64"
-
-
 def style_line_badge(row):
     """Colour the 'קו' cell like a Kavnav badge, based on the row's operator."""
     styles = [""] * len(row)
@@ -795,15 +980,6 @@ def style_line_badge(row):
             "text-align:center;"
         )
     return styles
-
-
-# ── shared helpers (used by both the line view and the stop view) ─────────────
-def _fmt(v, nd=2, suffix=""):
-    if v is None or (isinstance(v, float) and pd.isna(v)) or v == "" or str(v) == "nan":
-        return "—"
-    if isinstance(v, (int, float, np.floating, np.integer)) and not isinstance(v, bool):
-        return f"{v:,.{nd}f}{suffix}"
-    return f"{v}{suffix}"
 
 
 def render_map(map_rows, active_stops, key_suffix, *, fullscreen=False,
@@ -1007,6 +1183,12 @@ if view_mode == "🚏 דירוג תחנות":
     if _scode is None and len(stop_df):
         _scode = str(stop_df.iloc[0]["קוד תחנה"])
 
+    if _scode and _scode in STOPS_IDX:
+        _sp1, _sp2 = st.columns([3, 1])
+        _sp1.caption(f"🚏 תחנה {_scode} · {STOPS_IDX[_scode]['name']}")
+        if _sp2.button("📄 עמוד התחנה המלא", key="open_stop_page", use_container_width=True):
+            st.session_state.page = ("stop", _scode)
+            st.rerun()
     st.divider()
     _serving = (df_view[df_view["makat"].astype(str).isin(STOPS_IDX[_scode]["makats"])]
                 if _scode and _scode in STOPS_IDX else df_view.iloc[0:0])
@@ -1246,10 +1428,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 rank = sel_idx + 1
-st.markdown(
+_rk1, _rk2 = st.columns([3, 1])
+_rk1.markdown(
     f"**דירוג #{rank} מתוך {len(df_view)}**  ·  ציון כולל: "
     f"**{_fmt(sel_row.get('ציון סופי'))}**"
 )
+if _rk2.button("📄 עמוד הקו המלא", key="open_line_page", use_container_width=True):
+    st.session_state.page = ("line", str(sel_row["makat"]))
+    st.rerun()
 
 # 1) parameter score breakdown chart
 param_scores = {PARAM_LABELS[col]: sel_row.get(col, np.nan) for col in DEFAULT_WEIGHTS}

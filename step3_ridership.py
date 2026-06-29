@@ -3,9 +3,15 @@ Stage 3: Download ridership data from data.gov.il, compute PKM per Gush Dan line
 Also extracts AverageSpeed as cross-reference for commercial speed.
 """
 
+import json
 import requests
 import pandas as pd
 import numpy as np
+
+# passenger-per-ride profile: day-type × time band (data.gov.il column names)
+_DAYS  = ["ימי חול", "שישי", "שבת"]
+_SLOTS = ["00:00-03:59", "04:00-05:59", "06:00-08:59", "09:00-11:59",
+          "12:00-14:59", "15:00-18:59", "19:00-23:59"]
 
 CKAN_SEARCH  = "https://data.gov.il/api/3/action/datastore_search"
 RESOURCE_ID  = "7b126b6d-3411-4438-89c3-8eceea61c2db"   # 2026 ridership
@@ -45,19 +51,20 @@ def main():
         df = df[df["RouteParticular"] == "סדיר"].copy()
         print(f"Regular-only filter: kept {len(df)} of {before} rows")
 
-    # Ensure numeric
-    for col in ["WeeklyKM", "WeeklyPassengers", "RouteLength", "AverageSpeed"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Ensure numeric (core + extras + the hourly passenger-profile bands)
+    _band_cols = [f"{d} - {s}" for d in _DAYS for s in _SLOTS
+                  if f"{d} - {s}" in df.columns]
+    for col in ["WeeklyKM", "WeeklyPassengers", "RouteLength", "AverageSpeed",
+                "StationsInRoute", "AverageTripDuration", "DailyPassengers",
+                "WeekyRides", "UniqueStations", "AVGCommutersPerRide(Weekly)",
+                "AVGPassengersPerWeek", "OperatingCostPerPassenger",
+                "NumOfAlternatives", "DailyRides(Tuesday)", "ערך מקסימום בתקופת יום",
+                "דרוג הפחתה", "דרוג הוספה"] + _band_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     # PKM = passengers per km
     df["PKM"] = df["WeeklyPassengers"] / df["WeeklyKM"]
-
-    # Aggregate per RouteName (line number) + AgencyName, average across directions
-    # numeric extras
-    for col in ["StationsInRoute", "AverageTripDuration", "DailyPassengers",
-                "WeekyRides", "UniqueStations", "AVGCommutersPerRide(Weekly)"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     def first_valid(s):
         v = s.dropna()
@@ -72,6 +79,7 @@ def main():
                  district     =("Metropolin",     "first"),
                  cluster      =("ClusterName",     first_valid),
                  service_type =("ServiceType",    "first"),
+                 route_type   =("RouteType",       first_valid),
                  particular   =("RouteParticular","first"),
                  bus_type     =("BusType",        "first"),
                  bus_size     =("BusSize",         first_valid),
@@ -79,17 +87,46 @@ def main():
                  dest_city    =("DestinationCityName", first_valid),
                  operation_since=("OperationSince", first_valid),
                  stations     =("StationsInRoute", "mean"),
+                 unique_stations=("UniqueStations", "mean"),
+                 num_alternatives=("NumOfAlternatives", "mean"),
                  trip_duration=("AverageTripDuration", "mean"),
                  daily_pass   =("DailyPassengers", "mean"),
                  avg_pass_ride=("AVGCommutersPerRide(Weekly)", "mean"),
+                 avg_pass_week=("AVGPassengersPerWeek", "mean"),
+                 daily_rides_tue=("DailyRides(Tuesday)", "mean"),
                  weekly_rides =("WeekyRides",      "sum"),
+                 cost_per_pass=("OperatingCostPerPassenger", "mean"),
                  PKM          =("PKM",           "mean"),
                  AverageSpeed =("AverageSpeed",   "mean"),
                  RouteLength  =("RouteLength",    "mean"),
                  WeeklyKM     =("WeeklyKM",       "sum"),
                  WeeklyPassengers=("WeeklyPassengers","sum"),
+                 recommendation=("המלצה",          first_valid),
+                 peak_period  =("נסועה מקסימלית",  first_valid),
+                 peak_period_val=("ערך מקסימום בתקופת יום", "mean"),
+                 rank_reduce  =("דרוג הפחתה",       "mean"),
+                 rank_add     =("דרוג הוספה",       "mean"),
              )
              .rename(columns={"RouteID": "makat"}))
+
+    # hourly passenger-per-ride profile per route → JSON column `pax_profile`
+    if _band_cols:
+        prof = df.groupby("RouteID")[_band_cols].mean()
+
+        def _profile(rid):
+            row = prof.loc[rid] if rid in prof.index else None
+            out = {}
+            for d in _DAYS:
+                vals = {}
+                for s in _SLOTS:
+                    c = f"{d} - {s}"
+                    v = None if row is None or c not in _band_cols or pd.isna(row[c]) \
+                        else round(float(row[c]), 1)
+                    vals[s] = v
+                out[d] = vals
+            return json.dumps(out, ensure_ascii=False)
+
+        agg["pax_profile"] = agg["makat"].map(_profile)
 
     # Normalise operator names to match stage 1
     name_map = {
