@@ -1005,6 +1005,13 @@ fmap.get_root().header.add_child(folium.Element(
     "font-weight:800;font-size:12px;line-height:1.2;padding:3px 8px;"
     "border-radius:9px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.55);"
     "transform:translate(-50%,-50%);}"
+    # teardrop location pin for a searched stop (distinct from the flat badges)
+    ".stoppin{background:transparent !important;border:none !important;}"
+    ".stoppin .pin{width:34px;height:34px;border-radius:50% 50% 50% 0;"
+    "background:#d32f2f;border:3px solid #fff;transform:rotate(-45deg);"
+    "box-shadow:0 3px 8px rgba(0,0,0,.5);display:flex;align-items:center;"
+    "justify-content:center;}"
+    ".stoppin .pin span{transform:rotate(45deg);font-size:16px;line-height:1;}"
     "</style>"
 ))
 
@@ -1092,23 +1099,30 @@ for order, (_, r) in enumerate(map_rows.iterrows()):
     number_badge(line_pts[len(line_pts) // 2], r["line_number"], color)
     drawn += 1
 
-# searched stops: drop a prominent marker at each stop location + focus there
+# searched stops: mark each with a distinct teardrop location pin (clearly
+# different from the flat route-number badges) + a halo so it stands out.
 for _c in _search_stops:
     _st = STOPS_IDX[_c]
     if _st["lat"] and _st["lon"]:
-        all_pts.append([_st["lat"], _st["lon"]])
+        latlon = [_st["lat"], _st["lon"]]
+        all_pts.append(latlon)
+        _tip = folium.Tooltip(
+            f"<div style='direction:rtl;font-family:Heebo,sans-serif'>"
+            f"<b>🚏 תחנה {_c}</b><br>{_st['name']}<br>"
+            f"<span style='color:#5f6368'>{_st['city']} · "
+            f"{len(_st['makats'])} קווים</span></div>")
+        # soft halo ring to draw the eye to the exact location
+        folium.CircleMarker(latlon, radius=15, color="#d32f2f", weight=2,
+                            fill=True, fill_color="#d32f2f",
+                            fill_opacity=0.15).add_to(fmap)
+        # teardrop pin (CSS), tip anchored exactly on the stop coordinate
         folium.Marker(
-            [_st["lat"], _st["lon"]],
+            latlon,
             icon=folium.DivIcon(
-                class_name="routebadge", icon_size=(0, 0), icon_anchor=(0, 0),
-                html=(f"<span class='rb' style='background:#d32f2f;font-size:13px;"
-                      f"padding:4px 9px;'>🚏 {_c}</span>"),
+                class_name="stoppin", icon_size=(34, 46), icon_anchor=(17, 46),
+                html="<div class='pin'><span>🚏</span></div>",
             ),
-            tooltip=folium.Tooltip(
-                f"<div style='direction:rtl;font-family:Heebo,sans-serif'>"
-                f"<b>תחנה {_c}</b><br>{_st['name']}<br>"
-                f"<span style='color:#5f6368'>{_st['city']} · "
-                f"{len(_st['makats'])} קווים</span></div>"),
+            tooltip=_tip, z_index_offset=1000,
         ).add_to(fmap)
 
 if all_pts:
