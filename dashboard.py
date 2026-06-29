@@ -197,8 +197,23 @@ st.markdown(
 
 # ── data loading ──────────────────────────────────────────────────────────────
 
+_STAGE_FILES = ("stage1_gtfs.parquet", "stage3_ridership.parquet",
+                "stage4_stops.parquet", "stage5_shapes.parquet",
+                "stage6_frequency.parquet", "stage2_siri.parquet")
+
+
+def _data_version():
+    """Newest mtime across all stage files. Passed into load_data() so the
+    cache invalidates automatically whenever the data is refreshed (weekly
+    GitHub Action commit), without needing a manual reboot / cache clear."""
+    base = os.path.dirname(__file__)
+    mt = [os.path.getmtime(os.path.join(base, f)) for f in _STAGE_FILES
+          if os.path.exists(os.path.join(base, f))]
+    return max(mt) if mt else 0.0
+
+
 @st.cache_data(ttl=3600)
-def load_data():
+def load_data(data_version: float = 0.0):  # data_version keys the cache
     base = os.path.dirname(__file__)
 
     s1 = pd.read_parquet(os.path.join(base, "stage1_gtfs.parquet"))
@@ -330,7 +345,7 @@ def compute_score(df, weights):
 
 
 # ── scoring weights + min-trips → rendered in a top-bar popover (no sidebar) ───
-_d = load_data()
+_d = load_data(_data_version())
 _missing_cols = [col for col in DEFAULT_WEIGHTS
                  if col in _d.columns and _d[col].isna().all()]
 
@@ -362,7 +377,7 @@ def render_weights(container):
 
 
 # ── sticky filter bar (compact Material chips) ────────────────────────────────
-df_all = load_data()
+df_all = load_data(_data_version())
 
 
 def options_for(col):
