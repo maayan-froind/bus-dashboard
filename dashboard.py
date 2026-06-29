@@ -663,30 +663,54 @@ with st.container(key="searchbox"):
         _names = "، ".join(f"{c} ({STOPS_IDX[c]['name']})" for c in sorted(_search_stops))
         st.caption(f"🚏 תחנה {_names} — {len(_stop_makats)} קווים עוצרים בה")
 
-# ── free-text chat over the data (answers grounded only in our datasets) ──────
-with st.expander("💬 שאל את הנתונים בשפה חופשית"):
-    st.caption("שאלו על קווים/תחנות/מפעילים. התשובות מבוססות **רק** על הנתונים שחולצו "
-               "מהמאגרים (לא ידע כללי). דוגמאות: «איזה קו עם הציון הכי גבוה בתל אביב?», "
-               "«כמה קווים עוצרים בתחנה 21472?», «מה ה-headway הממוצע של אגד?»")
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-    if st.session_state.chat_history:
-        _cc1, _cc2 = st.columns([5, 1])
-        if _cc2.button("🗑️ נקה", key="chat_clear", use_container_width=True):
+# ── floating chat widget (FAB → docked chat panel, grounded in our data) ──────
+st.markdown(
+    "<style>"
+    ".st-key-chatfab{position:fixed !important;bottom:20px;left:20px;z-index:1200;width:auto !important;}"
+    ".st-key-chatfab button{width:60px !important;height:60px !important;min-height:60px !important;"
+    "border-radius:50% !important;font-size:1.6rem !important;padding:0 !important;"
+    "box-shadow:0 6px 18px rgba(26,115,232,.45) !important;}"
+    ".st-key-chatpanel{position:fixed !important;bottom:92px;left:20px;width:400px;max-width:92vw;"
+    "z-index:1190;background:var(--md-surface);border:1px solid var(--md-outline);"
+    "border-radius:18px;box-shadow:0 12px 40px rgba(0,0,0,.30);overflow:hidden;padding:0 !important;}"
+    ".st-key-chatpanel .chat-head{background:#182443;color:#fff;font-weight:700;font-size:1rem;"
+    "padding:13px 16px;display:flex;align-items:center;gap:8px;}"
+    ".st-key-chatmsgs{max-height:46vh;overflow-y:auto;padding:10px 12px 4px;}"
+    ".st-key-chatpanel [data-testid='stChatInput']{position:static !important;padding:6px 12px 12px;}"
+    ".st-key-chatpanel [data-testid='stChatMessage']{padding:.35rem .5rem;}"
+    "</style>",
+    unsafe_allow_html=True,
+)
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "chat_open" not in st.session_state:
+    st.session_state.chat_open = False
+# floating action button toggles the panel open/closed
+if st.button("✖" if st.session_state.chat_open else "💬", key="chatfab",
+             help="שאל את הנתונים בשפה חופשית"):
+    st.session_state.chat_open = not st.session_state.chat_open
+    st.rerun()
+if st.session_state.chat_open:
+    with st.container(key="chatpanel"):
+        _ch1, _ch2 = st.columns([5, 1])
+        _ch1.markdown("<div class='chat-head'>💬 שאל את הנתונים</div>", unsafe_allow_html=True)
+        if _ch2.button("🗑️", key="chat_clear", help="נקה שיחה"):
             st.session_state.chat_history = []
             st.rerun()
-    for _m in st.session_state.chat_history:
-        with st.chat_message("user" if _m["role"] == "user" else "assistant"):
-            st.markdown(_m["content"] if isinstance(_m["content"], str) else "…")
-    if _q := st.chat_input("שאלו שאלה על הנתונים…", key="chat_in"):
-        with st.chat_message("user"):
-            st.markdown(_q)
-        with st.chat_message("assistant"):
+        with st.container(key="chatmsgs"):
+            if not st.session_state.chat_history:
+                st.caption("שאלו על קווים, תחנות או מפעילים — בשפה חופשית. התשובות מבוססות "
+                           "**רק** על הנתונים שלנו. למשל: «איזה קו עם הציון הכי גבוה בתל אביב?», "
+                           "«כמה קווים עוצרים בתחנה 21472?», «מה ה-headway הממוצע של אגד?»")
+            for _m in st.session_state.chat_history:
+                with st.chat_message("user" if _m["role"] == "user" else "assistant"):
+                    st.markdown(_m["content"] if isinstance(_m["content"], str) else "…")
+        if _q := st.chat_input("הקלידו שאלה…", key="chat_in"):
+            st.session_state.chat_history.append({"role": "user", "content": _q})
             with st.spinner("שואל את הנתונים…"):
-                _ans = ask_data(_q, st.session_state.chat_history)
-            st.markdown(_ans)
-        st.session_state.chat_history.append({"role": "user", "content": _q})
-        st.session_state.chat_history.append({"role": "assistant", "content": _ans})
+                _ans = ask_data(_q, st.session_state.chat_history[:-1])
+            st.session_state.chat_history.append({"role": "assistant", "content": _ans})
+            st.rerun()
 
 if df_view.empty:
     st.warning("🔍 אין קווים התואמים את הסינון הנוכחי. הרחיבו את הפילטרים או לחצו «בחר הכל».")
