@@ -37,9 +37,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: python-app
+          # include-hidden-files defaults to false in v4, which dropped
+          # .streamlit/config.toml from the deploy and made Streamlit fall
+          # back to the browser's dark theme (white title, black search box).
+          include-hidden-files: true
           path: |
             .
             !antenv/
+            !.git/
 
       # 🚫 Opting Out of Oryx Build
       # If you prefer to disable the Oryx build process during deployment, follow these steps:
