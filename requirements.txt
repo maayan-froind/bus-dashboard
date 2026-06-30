@@ -1,9 +1,9 @@
-streamlit>=1.50
+streamlit==1.50.0
 pandas
 numpy
 pyarrow
 requests
-plotly
+plotly==6.8.0
 folium
 streamlit-folium
 streamlit-aggrid
