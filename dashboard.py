@@ -112,14 +112,20 @@ _MD_CSS = (
 # hide the unused native sidebar entirely
 "[data-testid='stSidebar'],[data-testid='stSidebarCollapsedControl'],[data-testid='collapsedControl']{display:none !important;}"
 # pin the folium map element to the left half at full viewport height
-"[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium']){position:fixed !important;left:0 !important;top:124px !important;width:50vw !important;height:calc(100vh - 124px) !important;z-index:500;margin:0 !important;padding:0 !important;}"
-"[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium'])>div,iframe[title='streamlit_folium.st_folium']{width:50vw !important;height:calc(100vh - 124px) !important;}"
+"[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium']){position:fixed !important;left:0 !important;top:64px !important;width:50vw !important;height:calc(100vh - 64px) !important;z-index:500;margin:0 !important;padding:0 !important;}"
+"[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium'])>div,iframe[title='streamlit_folium.st_folium']{width:50vw !important;height:calc(100vh - 64px) !important;}"
 # header + filter bar always span the full screen width, sitting above the map
 # header + filter bar are fixed to the viewport, full width, stacked at the top
 ".lm-header{position:fixed !important;top:0 !important;left:0 !important;width:100vw !important;z-index:601 !important;margin:0 !important;border-radius:0 !important;box-sizing:border-box;}"
-".st-key-filterbar{position:fixed !important;top:60px !important;left:0 !important;width:100vw !important;z-index:600 !important;margin:0 !important;background:var(--md-surface);box-shadow:var(--md-elev-1);padding:0.35rem 1.2rem !important;box-sizing:border-box;}"
-# content + map start below the two fixed bars
-".block-container,[data-testid='stMainBlockContainer']{padding-top:124px !important;}"
+".st-key-filterbar{background:var(--md-surface);border:1px solid var(--md-outline);border-radius:14px;box-shadow:var(--md-elev-1);padding:0.45rem 0.9rem !important;margin:0 0 0.7rem !important;}"
+# prominent ranking-mode selector (lines vs stops), sits right under the title
+".st-key-modesel{margin:0.1rem 0 0.8rem;}"
+".st-key-modesel [data-testid='stButtonGroup']{justify-content:center;gap:0;}"
+".st-key-modesel [data-testid='stButtonGroup'] button{font-size:1.18rem !important;"
+"font-weight:700 !important;padding:0.65rem 2.2rem !important;}"
+".st-key-modesel [class*='stBaseButton-segmented_controlActive']{background:linear-gradient(135deg,#1a73e8,#1557b0) !important;color:#fff !important;border-color:#1557b0 !important;}"
+# content starts below the single fixed header bar
+".block-container,[data-testid='stMainBlockContainer']{padding-top:64px !important;}"
 # ===== responsive: narrower laptops (≈1366px) — give the data side more room =====
 "@media (max-width:1500px){"
 ".block-container,[data-testid='stMainBlockContainer']{margin-left:42vw !important;max-width:56vw !important;padding-left:0.7rem !important;padding-right:1rem !important;}"
@@ -977,35 +983,9 @@ def ask_data(question, history):
             _add_chat_spend(_in_tok / 1e6 * _CHAT_PRICE_IN + _out_tok / 1e6 * _CHAT_PRICE_OUT)
 
 
-# Filter bar (full-width, fixed at top): compact chips.
-# (The central search lives lower, under the page title — its value is read from
-#  session_state below so filtering can run before that widget is rendered.)
-with st.container(key="filterbar"):
-    cols = st.columns([1.4, 1.0, 1.1, 1.3, 1.1, 1.3])
-    weights, min_trips = render_weights(cols[0])
-    sel_ops      = filter_chip(cols[1], "מפעיל",        "operator",     "op")
-    sel_district = filter_chip(cols[2], "מחוז",         "district",     "district")
-    sel_service  = filter_chip(cols[3], "סוג קו שירות", "service_type", "service")
-    sel_partic   = filter_chip(cols[4], "ייחודיות",     "particular",   "partic")
-    sel_bustype  = filter_chip(cols[5], "סוג אוטובוס",  "bus_type",     "bustype")
-
-
-# ── apply filters ─────────────────────────────────────────────────────────────
-# note: date filter is UI-only (data is a fixed weekly snapshot)
-df_view = df_all.copy()
-for col, sel in [("operator", sel_ops), ("district", sel_district),
-                 ("service_type", sel_service), ("particular", sel_partic),
-                 ("bus_type", sel_bustype)]:
-    if col not in df_view.columns:
-        continue
-    # "all selected" → skip (keep everything, incl. NaN rows); otherwise filter
-    if len(sel) < len(options_for(col)):
-        df_view = df_view[df_view[col].astype(str).isin(sel)]
-
-# central search — keep routes matching any selected city / line / stop number.
-# value comes from session_state (the widget itself is rendered under the title).
-# city & line come as "עיר · X" / "קו · X" options; a bare typed number is a stop
-# code (accept_new_options) matched against the stop index.
+# central search — read the value from session_state BEFORE rendering the widget
+# (so filtering / navigation can run first). city & line come as "עיר · X" /
+# "קו · X" options; a bare typed number is a stop code matched to the stop index.
 search_sel = st.session_state.get("main_search", [])
 _search_cities, _search_lines, _search_stops = set(), set(), set()
 for _s in search_sel:
@@ -1024,41 +1004,70 @@ if _search_stops:
         if not (s.strip().isdigit() and s.strip() in STOPS_IDX)]
     st.session_state.page = ("stop", _stop_target)
     st.rerun()
-# union of makats serving any searched stop
-_stop_makats = set()
-for _c in _search_stops:
-    _stop_makats |= STOPS_IDX[_c]["makats"]
-if _search_cities or _search_lines or _search_stops:
-    def _match(row):
-        if _search_lines and str(row["line_number"]) in _search_lines:
-            return True
-        if _stop_makats and str(row["makat"]) in _stop_makats:
-            return True
-        return bool(_search_cities & set(row["cities"]))
-    df_view = df_view[df_view.apply(_match, axis=1)]
-
-df_view = df_view[df_view["peak_trips"] >= min_trips]
-
-df_view["ציון סופי"] = compute_score(df_view, weights).round(2)
-df_view = df_view.sort_values("ציון סופי", ascending=False).reset_index(drop=True)
-df_view.index = df_view.index + 1
 
 
 # ── main content ──────────────────────────────────────────────────────────────
 st.title("🚌 דירוג קווי אוטובוס — כל הארץ")
-st.markdown(f"**{len(df_view)} קווים** | נתוני GTFS + SIRI + נסועה 2026")
 
-# central search — under the title, full table width (rendered before the empty
-# check so it stays editable even when a search returns no results)
+# prominent ranking-mode selector (lines vs stops) — top of the page
+_MODE_LINES, _MODE_STOPS = "🚌 דירוג קווים", "🚏 דירוג תחנות"
+with st.container(key="modesel"):
+    view_mode = st.segmented_control(
+        "תצוגת דירוג", [_MODE_LINES, _MODE_STOPS],
+        default=_MODE_LINES, key="view_mode", label_visibility="collapsed",
+    ) or _MODE_LINES
+_is_lines = view_mode == _MODE_LINES
+
+# central search — under the selector (rendered before the empty check so it
+# stays editable even when a search returns no results)
 with st.container(key="searchbox"):
     st.multiselect(
         "חיפוש", options=search_options(), key="main_search",
         label_visibility="collapsed", accept_new_options=True,
         placeholder="🔍 עיר / יישוב / קו (מהרשימה) · או הקלידו מספר תחנה…",
     )
-    if _search_stops:
-        _names = "، ".join(f"{c} ({STOPS_IDX[c]['name']})" for c in sorted(_search_stops))
-        st.caption(f"🚏 תחנה {_names} — {len(_stop_makats)} קווים עוצרים בה")
+
+# filter bar — relevant ONLY for the bus-line ranking; sits below the search.
+# In stop mode we fall back to neutral defaults so the stop ranking spans all lines.
+if _is_lines:
+    with st.container(key="filterbar"):
+        cols = st.columns([1.4, 1.0, 1.1, 1.3, 1.1, 1.3])
+        weights, min_trips = render_weights(cols[0])
+        sel_ops      = filter_chip(cols[1], "מפעיל",        "operator",     "op")
+        sel_district = filter_chip(cols[2], "מחוז",         "district",     "district")
+        sel_service  = filter_chip(cols[3], "סוג קו שירות", "service_type", "service")
+        sel_partic   = filter_chip(cols[4], "ייחודיות",     "particular",   "partic")
+        sel_bustype  = filter_chip(cols[5], "סוג אוטובוס",  "bus_type",     "bustype")
+else:
+    weights, min_trips = DEFAULT_WEIGHTS, 0
+    sel_ops = sel_district = sel_service = sel_partic = sel_bustype = None
+
+# ── apply filters ─────────────────────────────────────────────────────────────
+df_view = df_all.copy()
+if _is_lines:
+    for col, sel in [("operator", sel_ops), ("district", sel_district),
+                     ("service_type", sel_service), ("particular", sel_partic),
+                     ("bus_type", sel_bustype)]:
+        # "all selected" → skip (keep everything, incl. NaN rows); otherwise filter
+        if col in df_view.columns and len(sel) < len(options_for(col)):
+            df_view = df_view[df_view[col].astype(str).isin(sel)]
+    df_view = df_view[df_view["peak_trips"] >= min_trips]
+
+# central search filter — city / line (stop numbers navigate away above)
+if _search_cities or _search_lines:
+    def _match(row):
+        if _search_lines and str(row["line_number"]) in _search_lines:
+            return True
+        return bool(_search_cities & set(row["cities"]))
+    df_view = df_view[df_view.apply(_match, axis=1)]
+
+df_view["ציון סופי"] = compute_score(df_view, weights).round(2)
+df_view = df_view.sort_values("ציון סופי", ascending=False).reset_index(drop=True)
+df_view.index = df_view.index + 1
+st.caption(
+    f"**{len(df_view):,} קווים** · נתוני GTFS + SIRI + נסועה 2026" if _is_lines
+    else "נתוני GTFS + SIRI + נסועה 2026"
+)
 
 # ── floating chat widget (FAB → docked chat panel, grounded in our data) ──────
 st.markdown(
@@ -1144,12 +1153,6 @@ if st.session_state.chat_open:
 if df_view.empty:
     st.warning("🔍 אין קווים התואמים את הסינון הנוכחי. הרחיבו את הפילטרים או לחצו «בחר הכל».")
     st.stop()
-
-# choose which ranking to show: by bus line (default) or by stop code
-view_mode = st.radio(
-    "תצוגת דירוג", ["🚌 דירוג קווים", "🚏 דירוג תחנות"],
-    horizontal=True, label_visibility="collapsed", key="view_mode",
-)
 
 # Layout: all page content lives in the right 50% (CSS pushes .block-container
 # right); the folium map is CSS-pinned to the left 50% at full viewport height.
