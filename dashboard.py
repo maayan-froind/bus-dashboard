@@ -504,6 +504,26 @@ def load_stops_index(data_version: float = 0.0):
 STOPS_IDX = load_stops_index(_data_version())
 
 
+@st.cache_data(ttl=3600)
+def _line_taps_index(data_version: float = 0.0):
+    """Aggregate stage8 boardings (תיקופי מסלקה) to the line level: for each makat,
+    sum the boardings of every stop the line serves. NOTE: a stop's boardings are
+    shared by ALL lines stopping there, so this is a footfall proxy ALONG the route,
+    not boardings of this specific line (per-line demand comes from stage3 ridership)."""
+    agg = {}
+    for info in STOPS_IDX.values():
+        has = info.get("taps_total") is not None
+        for mk in info.get("makats", ()):
+            d = agg.setdefault(str(mk), {"n_stops": 0, "n_taps": 0,
+                                         "taps_total": 0.0, "taps_daily": 0.0})
+            d["n_stops"] += 1
+            if has:
+                d["n_taps"] += 1
+                d["taps_total"] += info["taps_total"]
+                d["taps_daily"] += (info.get("taps_daily") or 0.0)
+    return agg
+
+
 # ── shared helpers + dedicated line / stop pages ──────────────────────────────
 # Kavnav-style colour per operator (defined early so the dedicated pages can use it)
 OP_COLORS = {
@@ -606,6 +626,11 @@ def _pax_profile_chart(pj):
     st.plotly_chart(fig, use_container_width=True)
 
 
+# MAINTENANCE RULE: every datum keyed by a line (makat) must surface on the line
+# page below, and every datum keyed by a stop code must surface on the stop page
+# (render_stop_page). When a new source/stage is added, wire it into BOTH the
+# relevant per-line and per-stop views, not just one. Stop-keyed data can also be
+# aggregated to the line level (see _line_taps_index) with an honest caveat.
 def render_line_page(makat):
     if st.button("← חזרה לדשבורד", key="back_line"):
         st.session_state.page = None
@@ -653,7 +678,9 @@ def render_line_page(makat):
              ("אורך קו רשמי (ק״מ)", _fmt(r.get("RouteLength"))),
              ("Circuity (פיתול)", _fmt(r.get("circuity"))),
              ("מס׳ תחנות", _fmt(r.get("stations"), 0)),
-             ("תחנות ייחודיות", _fmt(r.get("unique_stations"), 0))])
+             ("תחנות ייחודיות", _fmt(r.get("unique_stations"), 0)),
+             ("שיעור ביצוע נסיעות (SIRI)", _fmt(r.get("trip_execution_rate"))),
+             ("ציון עמידה בלו״ז (SIRI)", _fmt(r.get("score_adherence"), 0))])
     with c2:
         st.subheader("👥 נסועה (נוסעים)")
         _kv([("נוסעים ביום", _fmt(r.get("daily_pass"), 0)),
@@ -669,6 +696,18 @@ def render_line_page(makat):
              ("ערך שיא בתקופת יום", _fmt(r.get("peak_period_val"))),
              ("דירוג הפחתה", _fmt(r.get("rank_reduce"), 0)),
              ("דירוג הוספה", _fmt(r.get("rank_add"), 0))])
+    st.subheader("🎫 תיקופים לאורך המסלול")
+    st.caption("סה״כ עליות בכל התחנות שהקו עובר בהן · מקור: תיקופי מסלקה לתחנה (data.gov.il). "
+               "העליות בתחנה משותפות לכל הקווים בה, אז זהו מדד חשיפה לאורך המסלול ולא עליות של הקו עצמו "
+               "(לביקוש של הקו עצמו ראו «נסועה» למעלה).")
+    _lt = _line_taps_index(_data_version()).get(str(makat))
+    if _lt and _lt["n_taps"]:
+        _t1, _t2, _t3 = st.columns(3)
+        _t1.metric("תחנות במסלול עם נתוני תיקוף", f"{_lt['n_taps']} / {_lt['n_stops']}")
+        _t2.metric("סה״כ עליות בתחנות הקו (2026)", f"{_lt['taps_total']:,.0f}")
+        _t3.metric("עליות ליום בתחנות הקו (מצטבר)", f"{_lt['taps_daily']:,.0f}")
+    else:
+        st.info("אין נתוני תיקופים לתחנות הקו במאגר.")
     st.subheader("🕑 פרופיל נוסעים לפי שעה (נוסעים לנסיעה)")
     _pax_profile_chart(r.get("pax_profile"))
     st.subheader("🗺️ מסלול")
