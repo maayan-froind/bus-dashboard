@@ -84,6 +84,13 @@ _MD_CSS = (
 "[role='radiogroup']{flex-direction:row-reverse;justify-content:flex-end;gap:.25rem;}"
 "[data-testid='stAlert']{border-radius:var(--md-radius-sm);border:none;box-shadow:var(--md-elev-1);}"
 "[data-testid='stAlert'] *{text-align:right;direction:rtl;}"
+# ===== RTL guard: icons must use LOGICAL spacing, never physical margins =====
+# Streamlit splits a leading emoji/icon out of a label and spaces it with a
+# physical `margin-right` (an LTR assumption). In our RTL app the icon sits on
+# the RIGHT, so margin-right pushes it toward the edge and it overlaps the text.
+# Neutralise the physical margin and re-add the gap on the logical (reading) side
+# so labels like "🚌 דירוג קווים" render correctly app-wide.
+"[data-testid='stIconEmoji'],span[data-testid='stIconMaterial']{margin-right:0 !important;margin-left:0 !important;margin-inline-end:0.4rem !important;}"
 "hr{margin:1rem 0 !important;border-color:var(--md-outline) !important;}"
 "div[data-testid='stHorizontalBlock'] label{font-size:0.82rem;color:var(--md-on-surface-var);}"
 "[data-testid='stCaptionContainer']{color:var(--md-on-surface-var);text-align:right;}"
