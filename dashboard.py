@@ -891,6 +891,46 @@ def _run_sql(con, query):
     return res.to_csv(index=False) if len(res) else "(אין שורות תואמות)"
 
 
+# ── monthly spend cap for the chat (soft client-side guard) ───────────────────
+# Sonnet 4.6 pricing, USD per 1M tokens. The HARD cap should be set as a monthly
+# budget limit on the Anthropic Console workspace; this is defense-in-depth.
+_CHAT_PRICE_IN, _CHAT_PRICE_OUT = 3.0, 15.0
+_CHAT_CAP_DEFAULT = 50.0
+
+
+def _chat_cap():
+    try:
+        return float(st.secrets["CHAT_MONTHLY_CAP_USD"])
+    except Exception:
+        return float(os.environ.get("CHAT_MONTHLY_CAP_USD", _CHAT_CAP_DEFAULT))
+
+
+def _usage_path():
+    return os.path.join(os.path.dirname(__file__), "chat_usage.json")
+
+
+def _chat_spend(month=None):
+    month = month or date.today().strftime("%Y-%m")
+    try:
+        return float(json.load(open(_usage_path(), encoding="utf-8")).get(month, 0.0))
+    except Exception:
+        return 0.0
+
+
+def _add_chat_spend(cost):
+    month = date.today().strftime("%Y-%m")
+    data = {}
+    try:
+        data = json.load(open(_usage_path(), encoding="utf-8"))
+    except Exception:
+        data = {}
+    data[month] = round(data.get(month, 0.0) + cost, 5)
+    try:
+        json.dump(data, open(_usage_path(), "w", encoding="utf-8"))
+    except Exception:
+        pass
+
+
 def ask_data(question, history):
     """Run one chat turn grounded only in our data. Returns the answer text."""
     try:
@@ -900,17 +940,24 @@ def ask_data(question, history):
     if not key:
         return ("⚠️ לא הוגדר מפתח **ANTHROPIC_API_KEY**. הוסיפו אותו ל-`.streamlit/secrets.toml` "
                 "(מקומית) או ב-Settings → Secrets ב-Streamlit Cloud, ואז רעננו.")
+    cap = _chat_cap()
+    if _chat_spend() >= cap:
+        return (f"⚠️ נוצל תקציב הצ'אט החודשי (${cap:.0f}). "
+                "הצ'אט יתחדש אוטומטית בתחילת החודש הבא.")
     client = anthropic.Anthropic(api_key=key)
     lines, stops, stop_lines = _chat_tables(_data_version())
     con = duckdb.connect()
     con.register("lines", lines); con.register("stops", stops); con.register("stop_lines", stop_lines)
     messages = [{"role": m["role"], "content": m["content"]} for m in history]
     messages.append({"role": "user", "content": question})
+    _in_tok, _out_tok = 0, 0
     try:
         for _ in range(6):
             resp = client.messages.create(
                 model=_CHAT_MODEL, max_tokens=1500, system=_CHAT_SYSTEM,
                 tools=_CHAT_TOOLS, messages=messages)
+            _in_tok += resp.usage.input_tokens
+            _out_tok += resp.usage.output_tokens
             if resp.stop_reason == "tool_use":
                 messages.append({"role": "assistant", "content": resp.content})
                 results = []
@@ -926,6 +973,8 @@ def ask_data(question, history):
         return f"שגיאת API: {getattr(e, 'message', str(e))}"
     finally:
         con.close()
+        if _in_tok or _out_tok:
+            _add_chat_spend(_in_tok / 1e6 * _CHAT_PRICE_IN + _out_tok / 1e6 * _CHAT_PRICE_OUT)
 
 
 # Filter bar (full-width, fixed at top): compact chips.
@@ -1049,7 +1098,7 @@ _CHAT_EXAMPLES = [
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "chat_open" not in st.session_state:
-    st.session_state.chat_open = True          # open on first page load
+    st.session_state.chat_open = False         # closed by default; open via the FAB
 # floating action button toggles the panel open/closed
 if st.button("✖" if st.session_state.chat_open else "💬", key="chatfab",
              help="שאל את הנתונים בשפה חופשית"):
@@ -1074,6 +1123,8 @@ if st.session_state.chat_open:
             for _m in st.session_state.chat_history:
                 with st.chat_message("user" if _m["role"] == "user" else "assistant"):
                     st.markdown(_m["content"] if isinstance(_m["content"], str) else "…")
+        _spent, _cap = _chat_spend(), _chat_cap()
+        st.caption(f"תקציב חודשי: ${_spent:.2f} מתוך ${_cap:.0f}")
         _ask = st.chat_input("הקלידו שאלה…", key="chat_in") or _pending
         if _ask:
             st.session_state.chat_history.append({"role": "user", "content": _ask})

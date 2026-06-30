@@ -10,3 +10,6 @@ venv/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# chat token-usage tracker (runtime state)
+chat_usage.json
