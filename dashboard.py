@@ -781,17 +781,17 @@ elif _qp.get("page") == "stop" and _qp.get("code"):
     st.session_state.page = ("stop", str(_qp.get("code")))
     st.query_params.clear()
 
-# if a dedicated page is open, render it full-width and skip the dashboard
+# a dedicated page reuses the main split layout (map pinned left, data right) —
+# but pages have no filter bar, so the fixed map / content start at ~64px (just
+# under the header) instead of 124px.
 if st.session_state.get("page"):
-    # neutralise the fixed-left-map layout so the page is full width + inline map
     st.markdown(
         "<style>"
-        ".block-container,[data-testid='stMainBlockContainer']"
-        "{margin-left:0 !important;max-width:1120px !important;padding-top:78px !important;}"
         "[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium'])"
-        "{position:static !important;left:auto !important;top:auto !important;width:auto !important;height:auto !important;}"
+        "{top:64px !important;height:calc(100vh - 64px) !important;}"
         "[data-testid='stElementContainer']:has(iframe[title='streamlit_folium.st_folium'])>div,"
-        "iframe[title='streamlit_folium.st_folium']{width:100% !important;height:440px !important;}"
+        "iframe[title='streamlit_folium.st_folium']{height:calc(100vh - 64px) !important;}"
+        ".block-container,[data-testid='stMainBlockContainer']{padding-top:72px !important;}"
         "</style>",
         unsafe_allow_html=True,
     )
@@ -1016,6 +1016,14 @@ for _s in search_sel:
         _search_lines.add(_val)
     elif _s.strip().isdigit() and _s.strip() in STOPS_IDX:
         _search_stops.add(_s.strip())
+# searching a stop number jumps straight to that stop's page (and drops the stop
+# from the search box so 'back' returns to the dashboard rather than re-opening it)
+if _search_stops:
+    _stop_target = sorted(_search_stops)[0]
+    st.session_state.main_search = [s for s in search_sel
+        if not (s.strip().isdigit() and s.strip() in STOPS_IDX)]
+    st.session_state.page = ("stop", _stop_target)
+    st.rerun()
 # union of makats serving any searched stop
 _stop_makats = set()
 for _c in _search_stops:
