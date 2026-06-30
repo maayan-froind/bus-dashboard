@@ -673,6 +673,12 @@ def render_stop_page(code):
         st.rerun()
 
 
+# a clickable line number in the table navigates here via ?page=line&makat=…
+_qp = st.query_params
+if _qp.get("page") == "line" and _qp.get("makat"):
+    st.session_state.page = ("line", str(_qp.get("makat")))
+    st.query_params.clear()
+
 # if a dedicated page is open, render it full-width and skip the dashboard
 if st.session_state.get("page"):
     # neutralise the fixed-left-map layout so the page is full width + inline map
@@ -1318,10 +1324,34 @@ st.caption("👆 סמנו שורה (או כמה שורות) כדי לראות נ
 # ── AgGrid ranking table (true RTL) ───────────────────────────────────────────
 _badge_js = JsCode(
     "function(p){var c=(p.data&&p.data._color)||'#455a64';"
-    "return {backgroundColor:c,color:'#fff',fontWeight:'800',borderRadius:'8px',"
-    "textAlign:'center',display:'flex',alignItems:'center',justifyContent:'center',"
-    "margin:'5px 4px',lineHeight:'1'};}"
+    "return {backgroundColor:c,color:'#fff',fontWeight:'800',borderRadius:'8px',cursor:'pointer',"
+    "textDecoration:'underline',textAlign:'center',display:'flex',alignItems:'center',"
+    "justifyContent:'center',margin:'5px 4px',lineHeight:'1'};}"
 )
+# clicking the line-number cell opens that line's dedicated page (via query param,
+# read on the Python side). window.top navigates the parent app, not the iframe.
+_line_click_js = JsCode(
+    "function(e){if(e.column&&e.column.getColId()==='קו'){"
+    "var mk=e.data&&e.data['מק״ט'];"
+    "if(mk){window.top.location.search='?page=line&makat='+encodeURIComponent(mk);}}}"
+)
+# data-source shown on hover over each column header
+_SRC = {
+    "קו": "מקור: GTFS (משרד התחבורה) + נסועה (data.gov.il) · לחיצה פותחת את עמוד הקו",
+    "מק״ט": "מזהה הקו (RouteID) · data.gov.il + GTFS",
+    "מפעיל": "מקור: data.gov.il (נסועה)",
+    "אשכול": "מקור: data.gov.il (נסועה)",
+    "Headway (דק')": "מקור: GTFS (משרד התחבורה) — לוח זמנים מתוכנן",
+    "תדירות שיא": "מקור: GTFS (משרד התחבורה) — מחושב מ-Headway",
+    "תדירות שפל": "מקור: GTFS (משרד התחבורה) — לוח זמנים",
+    "תדירות יומית": "מקור: GTFS (משרד התחבורה) — מס׳ נסיעות מתוכננות",
+    "מהירות (קמ״ש)": "מקור: data.gov.il (נסועה) — מהירות מסחרית",
+    "אורך (ק״מ)": "מקור: GTFS (משרד התחבורה) — אורך מסלול מחושב",
+    "Circuity": "מקור: GTFS (משרד התחבורה) — מקדם פיתול מחושב",
+    "נוסעים לק״מ": "מקור: data.gov.il (נסועה)",
+    "נוסעים לנסיעה": "מקור: data.gov.il (נסועה)",
+    "ציון": "מחושב — ממוצע משוקלל של פרמטרי האיכות",
+}
 _score_js = JsCode(
     "function(p){var v=p.value;if(v==null)return{};"
     "var t=Math.max(0,Math.min(100,v))/100,r,g,b,k;"
@@ -1350,19 +1380,20 @@ gb.configure_column(" ", width=40, minWidth=40, maxWidth=40, pinned="right",
                     checkboxSelection=True, headerCheckboxSelection=True,
                     sortable=False, filter=False, suppressSizeToFit=True)
 gb.configure_column("קו", cellStyle=_badge_js, width=56, minWidth=52, maxWidth=64,
-                    pinned="right", suppressSizeToFit=True)
+                    pinned="right", suppressSizeToFit=True, headerTooltip=_SRC["קו"])
 gb.configure_column("מק״ט", width=80, minWidth=74, pinned="right",
-                    filter="agNumberColumnFilter", suppressSizeToFit=True)
+                    filter="agNumberColumnFilter", suppressSizeToFit=True,
+                    headerTooltip=_SRC["מק״ט"])
 gb.configure_column("אשכול", width=132, minWidth=120, pinned="right",
-                    suppressSizeToFit=True)
+                    suppressSizeToFit=True, headerTooltip=_SRC["אשכול"])
 # pinned left (always visible): score — whole number, tooltip explains it
 gb.configure_column(
     "ציון", cellStyle=_score_js, width=68, minWidth=68, maxWidth=80, pinned="left",
-    filter="agNumberColumnFilter", sort="desc", suppressSizeToFit=True,
+    filter="agNumberColumnFilter", sort="desc", suppressSizeToFit=True, headerTooltip=_SRC["ציון"],
     valueFormatter=JsCode("function(p){return p.value==null?'':Math.round(p.value);}"),
     tooltipValueGetter=JsCode("function(p){return p.data._scoretip;}"),
 )
-gb.configure_column("מפעיל", minWidth=100)
+gb.configure_column("מפעיל", minWidth=100, headerTooltip=_SRC["מפעיל"])
 # numeric columns: number filter + per-column minWidth that fits the FULL
 # single-line header (measured width + padding/sort-icon overhead) so no word
 # is ever cut off. On wide screens sizeColumnsToFit stretches them further.
@@ -1373,11 +1404,13 @@ _num_minw = {
 }
 for _nc, _mw in _num_minw.items():
     if _nc in show_df.columns:
-        gb.configure_column(_nc, filter="agNumberColumnFilter", minWidth=_mw)
+        gb.configure_column(_nc, filter="agNumberColumnFilter", minWidth=_mw,
+                            headerTooltip=_SRC.get(_nc))
 # native tooltips + fill the width on load and on any resize (no leftover white gap)
 gb.configure_grid_options(
     enableRtl=True, rowHeight=34,
     enableBrowserTooltips=False, tooltipShowDelay=250,
+    onCellClicked=_line_click_js,
     onFirstDataRendered=JsCode("function(p){p.api.sizeColumnsToFit();}"),
     onGridSizeChanged=JsCode("function(p){p.api.sizeColumnsToFit();}"),
 )
