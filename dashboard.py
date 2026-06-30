@@ -772,10 +772,13 @@ def render_sources_footer():
                    "תאריך «עודכן במקור» של data.gov.il נשלף בזמן אמת מ-CKAN.")
 
 
-# a clickable line number in the table navigates here via ?page=line&makat=…
+# deep-linking: ?page=line&makat=… or ?page=stop&code=… opens that page
 _qp = st.query_params
 if _qp.get("page") == "line" and _qp.get("makat"):
     st.session_state.page = ("line", str(_qp.get("makat")))
+    st.query_params.clear()
+elif _qp.get("page") == "stop" and _qp.get("code"):
+    st.session_state.page = ("stop", str(_qp.get("code")))
     st.query_params.clear()
 
 # if a dedicated page is open, render it full-width and skip the dashboard
@@ -1278,29 +1281,55 @@ if view_mode == "🚏 דירוג תחנות":
     st.subheader("🚏 טבלת דירוג תחנות")
     st.markdown(f"**{len(stop_df):,} תחנות** · נגזר מהקווים שעברו את הסינון "
                 f"· מיון לפי עליות ביום (תיקופים בפועל)")
-    st.caption("👆 סמנו תחנה כדי לראות אותה ואת הקווים שעוצרים בה על המפה")
+    st.caption("👆 לחצו על מספר תחנה כדי לפתוח את עמוד התחנה · או סמנו שורה לתצוגה על המפה")
 
+    _STOP_SRC = {
+        "קוד תחנה": "קוד תחנה · GTFS (משרד התחבורה) · לחיצה פותחת את עמוד התחנה",
+        "יישוב": "יישוב · GTFS (משרד התחבורה)",
+        "שם תחנה": "שם תחנה · GTFS (משרד התחבורה)",
+        "מס׳ קווים": "מס׳ קווים שעוצרים בתחנה · מחושב מ-GTFS",
+        "נסיעות ביום": "סך הנסיעות שעוצרות ביום · מחושב מ-GTFS (תדירות)",
+        "עליות ביום": "עליות ביום (ממוצע) · תיקופי מסלקה לתחנה (data.gov.il)",
+    }
     sgb = GridOptionsBuilder.from_dataframe(stop_df)
     sgb.configure_default_column(resizable=True, sortable=True,
                                  filter="agNumberColumnFilter", minWidth=90,
                                  cellStyle={"textAlign": "right"})
     sgb.configure_selection("single", use_checkbox=False)
     sgb.configure_column("קוד תחנה", pinned="right", width=110, minWidth=100,
-                         filter="agNumberColumnFilter")
-    sgb.configure_column("יישוב", filter="agTextColumnFilter", minWidth=120)
-    sgb.configure_column("שם תחנה", filter="agTextColumnFilter", minWidth=220)
-    sgb.configure_column("מס׳ קווים", width=104, minWidth=96)
-    sgb.configure_column("נסיעות ביום", width=116, minWidth=108)
+                         filter="agNumberColumnFilter", headerTooltip=_STOP_SRC["קוד תחנה"],
+                         cellStyle={"textAlign": "right", "color": "#1557b0",
+                                    "fontWeight": "700", "textDecoration": "underline",
+                                    "cursor": "pointer"})
+    sgb.configure_column("יישוב", filter="agTextColumnFilter", minWidth=120,
+                         headerTooltip=_STOP_SRC["יישוב"])
+    sgb.configure_column("שם תחנה", filter="agTextColumnFilter", minWidth=220,
+                         headerTooltip=_STOP_SRC["שם תחנה"])
+    sgb.configure_column("מס׳ קווים", width=104, minWidth=96, headerTooltip=_STOP_SRC["מס׳ קווים"])
+    sgb.configure_column("נסיעות ביום", width=116, minWidth=108, headerTooltip=_STOP_SRC["נסיעות ביום"])
     sgb.configure_column("עליות ביום", width=116, minWidth=108, sort="desc",
-                         headerTooltip="תיקופי רב-קו בפועל · ממוצע יומי 2026")
+                         headerTooltip=_STOP_SRC["עליות ביום"])
     sgb.configure_grid_options(enableRtl=True, rowHeight=34,
+                               enableBrowserTooltips=False,
                                onFirstDataRendered=JsCode("function(p){p.api.sizeColumnsToFit();}"),
                                onGridSizeChanged=JsCode("function(p){p.api.sizeColumnsToFit();}"))
     sgrid = AgGrid(stop_df, gridOptions=sgb.build(),
-                   update_mode=GridUpdateMode.SELECTION_CHANGED,
+                   update_mode=GridUpdateMode.SELECTION_CHANGED, update_on=["cellClicked"],
                    allow_unsafe_jscode=True, height=600, theme="alpine",
                    fit_columns_on_grid_load=True, key="stop_grid",
-                   custom_css={".ag-header-cell-text": {"font-size": "12px"}})
+                   custom_css={".ag-header-cell-text": {"font-size": "12px"},
+                               ".ag-tooltip": {"direction": "rtl", "text-align": "right",
+                                               "background": "#202124", "color": "#fff",
+                                               "border-radius": "8px", "padding": "7px 10px",
+                                               "max-width": "320px", "font-size": "12px"}})
+
+    # clicking the stop-code cell opens that stop's dedicated page
+    _sev = sgrid.event_data
+    if _sev and _sev.get("type") == "cellClicked":
+        _sval, _sd = _sev.get("value"), (_sev.get("data") or {})
+        if isinstance(_sval, str) and _sval == str(_sd.get("קוד תחנה")):
+            st.session_state.page = ("stop", str(_sd["קוד תחנה"]))
+            st.rerun()
 
     _ssel = sgrid.get("selected_rows")
     _scode = None
@@ -1373,9 +1402,11 @@ show_df = df_view[ordered].rename(columns=display_cols)
 show_df = show_df.round(2)
 # dedicated first column for the selection checkbox (keeps the קו badge clean)
 show_df.insert(0, " ", "")
-# hidden helper columns for AgGrid: per-operator colour + positional index
+# hidden helper columns for AgGrid: per-operator colour + positional index + makat
+# (_makat is an ASCII-keyed copy so the cell-click handler reads it reliably)
 show_df["_color"] = [OP_COLORS.get(o, DEFAULT_OP_COLOR) for o in df_view["operator"]]
 show_df["_idx"] = list(range(len(df_view)))
+show_df["_makat"] = df_view["makat"].astype(str).values
 
 
 def score_breakdown(row, weights):
@@ -1430,11 +1461,6 @@ _badge_js = JsCode(
 )
 # clicking the line-number cell opens that line's dedicated page (via query param,
 # read on the Python side). window.top navigates the parent app, not the iframe.
-_line_click_js = JsCode(
-    "function(e){if(e.column&&e.column.getColId()==='קו'){"
-    "var mk=e.data&&e.data['מק״ט'];"
-    "if(mk){window.top.location.search='?page=line&makat='+encodeURIComponent(mk);}}}"
-)
 # data-source shown on hover over each column header
 _SRC = {
     "קו": "מקור: GTFS (משרד התחבורה) + נסועה (data.gov.il) · לחיצה פותחת את עמוד הקו",
@@ -1452,6 +1478,11 @@ _SRC = {
     "נוסעים לנסיעה": "מקור: data.gov.il (נסועה)",
     "ציון": "מחושב — ממוצע משוקלל של פרמטרי האיכות",
 }
+
+
+def _hdr(name):
+    """Header tooltip = full column name (for truncated headers) + data source."""
+    return f"{name} · {_SRC[name]}" if name in _SRC else name
 _score_js = JsCode(
     "function(p){var v=p.value;if(v==null)return{};"
     "var t=Math.max(0,Math.min(100,v))/100,r,g,b,k;"
@@ -1474,26 +1505,27 @@ gb.configure_default_column(resizable=True, sortable=True, filter="agTextColumnF
 gb.configure_selection("multiple", use_checkbox=True, header_checkbox=True)
 gb.configure_column("_color", hide=True)
 gb.configure_column("_idx", hide=True)
+gb.configure_column("_makat", hide=True)
 gb.configure_column("_scoretip", hide=True)
 # narrow fixed columns that should NOT stretch (suppressSizeToFit keeps them small)
 gb.configure_column(" ", width=40, minWidth=40, maxWidth=40, pinned="right",
                     checkboxSelection=True, headerCheckboxSelection=True,
                     sortable=False, filter=False, suppressSizeToFit=True)
 gb.configure_column("קו", cellStyle=_badge_js, width=56, minWidth=52, maxWidth=64,
-                    pinned="right", suppressSizeToFit=True, headerTooltip=_SRC["קו"])
+                    pinned="right", suppressSizeToFit=True, headerTooltip=_hdr("קו"))
 gb.configure_column("מק״ט", width=80, minWidth=74, pinned="right",
                     filter="agNumberColumnFilter", suppressSizeToFit=True,
-                    headerTooltip=_SRC["מק״ט"])
+                    headerTooltip=_hdr("מק״ט"))
 gb.configure_column("אשכול", width=132, minWidth=120, pinned="right",
-                    suppressSizeToFit=True, headerTooltip=_SRC["אשכול"])
+                    suppressSizeToFit=True, headerTooltip=_hdr("אשכול"))
 # pinned left (always visible): score — whole number, tooltip explains it
 gb.configure_column(
     "ציון", cellStyle=_score_js, width=68, minWidth=68, maxWidth=80, pinned="left",
-    filter="agNumberColumnFilter", sort="desc", suppressSizeToFit=True, headerTooltip=_SRC["ציון"],
+    filter="agNumberColumnFilter", sort="desc", suppressSizeToFit=True, headerTooltip=_hdr("ציון"),
     valueFormatter=JsCode("function(p){return p.value==null?'':Math.round(p.value);}"),
     tooltipValueGetter=JsCode("function(p){return p.data._scoretip;}"),
 )
-gb.configure_column("מפעיל", minWidth=100, headerTooltip=_SRC["מפעיל"])
+gb.configure_column("מפעיל", minWidth=100, headerTooltip=_hdr("מפעיל"))
 # numeric columns: number filter + per-column minWidth that fits the FULL
 # single-line header (measured width + padding/sort-icon overhead) so no word
 # is ever cut off. On wide screens sizeColumnsToFit stretches them further.
@@ -1505,18 +1537,17 @@ _num_minw = {
 for _nc, _mw in _num_minw.items():
     if _nc in show_df.columns:
         gb.configure_column(_nc, filter="agNumberColumnFilter", minWidth=_mw,
-                            headerTooltip=_SRC.get(_nc))
+                            headerTooltip=_hdr(_nc))
 # native tooltips + fill the width on load and on any resize (no leftover white gap)
 gb.configure_grid_options(
     enableRtl=True, rowHeight=34,
     enableBrowserTooltips=False, tooltipShowDelay=250,
-    onCellClicked=_line_click_js,
     onFirstDataRendered=JsCode("function(p){p.api.sizeColumnsToFit();}"),
     onGridSizeChanged=JsCode("function(p){p.api.sizeColumnsToFit();}"),
 )
 grid = AgGrid(
     show_df, gridOptions=gb.build(),
-    update_mode=GridUpdateMode.SELECTION_CHANGED,
+    update_mode=GridUpdateMode.SELECTION_CHANGED, update_on=["cellClicked"],
     allow_unsafe_jscode=True, height=(820 if fullscreen else 600), theme="alpine",
     fit_columns_on_grid_load=True, key="ranking_grid",
     custom_css={
@@ -1543,6 +1574,16 @@ _dl.download_button(
     help="ייצוא טבלת הדירוג לקובץ Excel",
 )
 
+
+# clicking the line-number cell opens that line's dedicated page (via st_aggrid's
+# event_data channel — the AgGrid iframe is sandboxed against top navigation)
+_ev = grid.event_data
+if _ev and _ev.get("type") == "cellClicked":
+    _val, _d = _ev.get("value"), (_ev.get("data") or {})
+    # the "קו" cell is the only string cell whose value equals the row's קו value
+    if isinstance(_val, str) and _val == str(_d.get("קו")) and _d.get("_makat"):
+        st.session_state.page = ("line", str(_d["_makat"]))
+        st.rerun()
 
 # Resolve selected rows (via the hidden _idx column) → drives detail + map
 _sel = grid.get("selected_rows")
