@@ -8,6 +8,7 @@ Output: stage6_frequency.parquet → makat, daily_trips_dir, headway_offpeak
 """
 
 import time
+from pull_meta import record
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timedelta
 
@@ -100,6 +101,7 @@ def main():
                   headway_offpeak=("hw_off", "mean")))
     agg["makat"] = agg["makat"].astype(str)
     agg.to_parquet("stage6_frequency.parquet", index=False)
+    record("frequency", {"service_date": REF})
     print(f"\nSaved → stage6_frequency.parquet ({len(agg)} routes)")
     print(agg.head(8).to_string())
 

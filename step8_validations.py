@@ -14,6 +14,7 @@ Output: stage8_validations.parquet → code, taps_total, taps_daily_avg,
 """
 
 import time
+from pull_meta import record
 import requests
 import pandas as pd
 
@@ -85,6 +86,7 @@ def main():
         })
     out = pd.DataFrame(rows)
     out.to_parquet("stage8_validations.parquet", index=False)
+    record("validations", {"resource_id": RESOURCE_2026})
     print(f"\nSaved → stage8_validations.parquet ({len(out)} stations)")
     print(out.sort_values("taps_total", ascending=False).head(8).to_string(index=False))
 

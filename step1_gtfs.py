@@ -5,6 +5,7 @@ Saves stage1_gtfs.parquet for downstream stages.
 """
 
 import math, time
+from pull_meta import record
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 
@@ -335,6 +336,8 @@ def main():
     df_agg["makat"] = df_agg["makat"].astype(str)
 
     df_agg.to_parquet("stage1_gtfs.parquet", index=False)
+
+    record("gtfs", {"service_date": REF_DATE})
     df.to_parquet("stage1_gtfs_raw.parquet", index=False)
     print("\nSaved → stage1_gtfs.parquet")
 

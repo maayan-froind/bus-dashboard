@@ -1,0 +1,25 @@
+{
+ "gtfs": {
+  "pulled_at": "2026-06-29T21:40:26",
+  "service_date": "2026-06-22"
+ },
+ "frequency": {
+  "pulled_at": "2026-06-29T09:04:57",
+  "service_date": "2026-06-22"
+ },
+ "stops": {
+  "pulled_at": "2026-06-29T12:58:03",
+  "service_date": "2026-06-22"
+ },
+ "shapes": {
+  "pulled_at": "2026-06-26T08:27:44"
+ },
+ "ridership": {
+  "pulled_at": "2026-06-29T22:47:19",
+  "resource_id": "7b126b6d-3411-4438-89c3-8eceea61c2db"
+ },
+ "validations": {
+  "pulled_at": "2026-06-29T23:09:07",
+  "resource_id": "3ad014c3-e0a6-4ba0-9b2b-12a29d273512"
+ }
+}

@@ -10,6 +10,7 @@ import base64
 from datetime import date, timedelta
 import numpy as np
 import pandas as pd
+import requests
 import duckdb
 import anthropic
 import plotly.express as px
@@ -673,6 +674,77 @@ def render_stop_page(code):
         st.rerun()
 
 
+# ── data-sources footer (what we pull + when it was updated / pulled) ─────────
+@st.cache_data(ttl=21600)
+def _ckan_last_modified(resource_id):
+    try:
+        j = requests.get("https://data.gov.il/api/3/action/resource_show",
+                         params={"id": resource_id}, timeout=12).json()
+        res = j.get("result", {})
+        return res.get("last_modified") or res.get("metadata_modified") or res.get("created")
+    except Exception:
+        return None
+
+
+def _fmt_dt(s, date_only=False):
+    import datetime as _dt
+    if not s:
+        return "—"
+    try:
+        d = _dt.datetime.fromisoformat(str(s).replace("Z", "").split(".")[0].split("+")[0])
+        return d.strftime("%d/%m/%Y") if date_only else d.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return str(s)[:16]
+
+
+def render_sources_footer():
+    p = os.path.join(os.path.dirname(__file__), "data_meta.json")
+    meta = {}
+    if os.path.exists(p):
+        try:
+            meta = json.load(open(p, encoding="utf-8"))
+        except Exception:
+            meta = {}
+
+    def pulled(*keys):
+        v = [meta.get(k, {}).get("pulled_at") for k in keys if meta.get(k, {}).get("pulled_at")]
+        return max(v) if v else None
+
+    _svc = meta.get("gtfs", {}).get("service_date") or meta.get("stops", {}).get("service_date")
+    _rid = meta.get("ridership", {}).get("resource_id")
+    _vid = meta.get("validations", {}).get("resource_id")
+    rows = [
+        ("🚍 GTFS — משרד התחבורה", "Open Bus Stride API",
+         "לוחות זמנים, מסלולים, תחנות, תדירויות, אורך ופיתול",
+         f"יום שירות {_fmt_dt(_svc, True)}", _fmt_dt(pulled('gtfs', 'stops', 'shapes', 'frequency'))),
+        ("📊 נסועה בקווי אוטובוס", "data.gov.il",
+         "נתוני קו: נוסעים, מהירות, אורך, פרופיל שעות, עלות",
+         _fmt_dt(_ckan_last_modified(_rid)) if _rid else "—",
+         _fmt_dt(meta.get("ridership", {}).get("pulled_at"))),
+        ("🎫 תיקופי מסלקה לתחנה", "data.gov.il",
+         "עליות/תיקופים בפועל לכל תחנה (כל אמצעי הכרטוס)",
+         _fmt_dt(_ckan_last_modified(_vid)) if _vid else "—",
+         _fmt_dt(meta.get("validations", {}).get("pulled_at"))),
+    ]
+    with st.expander("ℹ️ מקורות המידע ותאריכי עדכון", expanded=False):
+        html = ("<table style='width:100%;direction:rtl;border-collapse:collapse;font-size:.9rem'>"
+                "<tr style='background:#f1f3f4;font-weight:700'>"
+                "<td style='padding:7px 10px'>מקור</td><td style='padding:7px 10px'>פלטפורמה</td>"
+                "<td style='padding:7px 10px'>מה כולל</td><td style='padding:7px 10px'>עודכן במקור</td>"
+                "<td style='padding:7px 10px'>נמשך אצלנו לאחרונה</td></tr>")
+        for nm, plat, desc, src, pull in rows:
+            html += (f"<tr style='border-top:1px solid #e0e0e0'>"
+                     f"<td style='padding:7px 10px;font-weight:600'>{nm}</td>"
+                     f"<td style='padding:7px 10px'>{plat}</td>"
+                     f"<td style='padding:7px 10px;color:#5f6368'>{desc}</td>"
+                     f"<td style='padding:7px 10px'>{src}</td>"
+                     f"<td style='padding:7px 10px'>{pull}</td></tr>")
+        html += "</table>"
+        st.markdown(html, unsafe_allow_html=True)
+        st.caption("הנתונים נמשכים מחדש אוטומטית (ריצה שבועית + רענון מלא ידני). "
+                   "תאריך «עודכן במקור» של data.gov.il נשלף בזמן אמת מ-CKAN.")
+
+
 # a clickable line number in the table navigates here via ?page=line&makat=…
 _qp = st.query_params
 if _qp.get("page") == "line" and _qp.get("makat"):
@@ -1223,6 +1295,7 @@ if view_mode == "🚏 דירוג תחנות":
                 if _scode and _scode in STOPS_IDX else df_view.iloc[0:0])
     render_map(_serving.head(15), {_scode} if _scode else set(),
                "stop_" + (str(_scode) or "none"), show_stops_default=True)
+    render_sources_footer()
     st.stop()
 
 
@@ -1642,3 +1715,5 @@ render_map(
     fullscreen=fullscreen,
     show_stops_default=(len(sel_indices) == 1),
 )
+
+render_sources_footer()

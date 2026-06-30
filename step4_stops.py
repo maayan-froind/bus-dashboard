@@ -12,6 +12,7 @@ route_timetable stops by stop `id` (verified identical id space, same date).
 """
 
 import json
+from pull_meta import record
 import time
 from datetime import date, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -174,6 +175,7 @@ def main():
     print(f"  {len(code_map)} stops with codes")
     idx = build_stop_index(makat_stop_ids, code_map)
     idx.to_parquet("stage7_stops_index.parquet", index=False)
+    record("stops", {"service_date": REF})
     print(f"Saved → stage7_stops_index.parquet ({len(idx)} stops on our lines)")
 
 

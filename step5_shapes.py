@@ -7,6 +7,7 @@ Output: stage5_shapes.parquet  →  makat, shape (json list of [lat, lon] road p
 """
 
 import json
+from pull_meta import record
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -85,6 +86,7 @@ def main():
                   for s in shapes.values()],
     })
     out.to_parquet("stage5_shapes.parquet", index=False)
+    record("shapes")
     ok = sum(1 for s in shapes.values() if s and len(s) > 2)
     print(f"\nSaved → stage5_shapes.parquet ({len(out)} routes, {ok} road-matched)")
 

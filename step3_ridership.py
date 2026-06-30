@@ -4,6 +4,7 @@ Also extracts AverageSpeed as cross-reference for commercial speed.
 """
 
 import json
+from pull_meta import record
 import requests
 import pandas as pd
 import numpy as np
@@ -139,6 +140,8 @@ def main():
     agg["makat"] = agg["makat"].astype(str)
 
     agg.to_parquet("stage3_ridership.parquet", index=False)
+
+    record("ridership", {"resource_id": RESOURCE_ID})
     print("\nSaved → stage3_ridership.parquet")
 
     # Preview
