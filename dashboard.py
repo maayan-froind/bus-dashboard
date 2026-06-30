@@ -6,6 +6,7 @@ Run: streamlit run dashboard.py
 import os
 import io
 import json
+import html
 import base64
 from datetime import date, timedelta
 import numpy as np
@@ -90,7 +91,18 @@ _MD_CSS = (
 # the RIGHT, so margin-right pushes it toward the edge and it overlaps the text.
 # Neutralise the physical margin and re-add the gap on the logical (reading) side
 # so labels like "🚌 דירוג קווים" render correctly app-wide.
-"[data-testid='stIconEmoji'],span[data-testid='stIconMaterial']{margin-right:0 !important;margin-left:0 !important;margin-inline-end:0.4rem !important;}"
+"[data-testid='stIconEmoji'],span[data-testid='stIconMaterial']{margin-right:0 !important;margin-left:0 !important;margin-inline-end:0 !important;}"
+# the physical gap actually lives on the unnamed SPAN that wraps the icon — flip it to logical
+"span:has(>[data-testid='stIconEmoji']),span:has(>span[data-testid='stIconMaterial']){margin-right:0 !important;margin-left:0 !important;margin-inline-end:0.4rem !important;}"
+# ===== RTL guard: every table reads right-to-left (first column on the RIGHT) =====
+# st.dataframe/Glide renders columns LTR on a canvas and ignores dir=rtl, so all
+# key/value & detail tables go through _rtl_table() which emits a real <table dir=rtl>.
+".rtl-tbl-wrap{border:1px solid var(--md-outline);border-radius:10px;overflow:auto;margin:.2rem 0 .7rem;}"
+".rtl-tbl{width:100%;border-collapse:collapse;direction:rtl;font-size:.9rem;background:var(--md-surface);}"
+".rtl-tbl thead th{position:sticky;top:0;background:var(--md-surface-variant);color:var(--md-on-surface-var);font-weight:600;text-align:right;padding:.5rem .75rem;border-bottom:1px solid var(--md-outline);white-space:nowrap;z-index:1;}"
+".rtl-tbl td{text-align:right;padding:.45rem .75rem;border-bottom:1px solid var(--md-outline);}"
+".rtl-tbl tbody tr:last-child td{border-bottom:none;}"
+".rtl-tbl tbody tr:hover td{background:rgba(26,115,232,.06);}"
 "hr{margin:1rem 0 !important;border-color:var(--md-outline) !important;}"
 "div[data-testid='stHorizontalBlock'] label{font-size:0.82rem;color:var(--md-on-surface-var);}"
 "[data-testid='stCaptionContainer']{color:var(--md-on-surface-var);text-align:right;}"
@@ -523,10 +535,31 @@ def _pg_geo(s):
         return []
 
 
+def _rtl_table(df, bg=None, max_height=None):
+    """Render a DataFrame as a TRUE right-to-left HTML table — first column on the
+    RIGHT, reading order Hebrew. (st.dataframe/Glide draws columns LTR on a canvas
+    and ignores dir=rtl, so every key/value & detail table on the site uses this.)
+    bg: optional {col_name: [css_string_per_row]} for per-cell background styling."""
+    cols = list(df.columns)
+    esc = lambda x: html.escape("" if x is None else str(x))
+    head = "".join(f"<th>{esc(c)}</th>" for c in cols)
+    body = []
+    for i, (_, row) in enumerate(df.iterrows()):
+        cells = []
+        for c in cols:
+            stl = ' style="{}"'.format(bg[c][i]) if bg and c in bg else ""
+            cells.append("<td{}>{}</td>".format(stl, esc(row[c])))
+        body.append("<tr>{}</tr>".format("".join(cells)))
+    wrap = f"max-height:{max_height}px;overflow-y:auto;" if max_height else ""
+    st.markdown(
+        f"<div class='rtl-tbl-wrap' style='{wrap}'><table class='rtl-tbl' dir='rtl'>"
+        f"<thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table></div>",
+        unsafe_allow_html=True,
+    )
+
+
 def _kv(pairs):
-    d = pd.DataFrame([(lbl, val) for lbl, val in pairs], columns=["שדה", "ערך"])
-    st.dataframe(d.style.set_properties(**{"text-align": "right", "direction": "rtl"}),
-                 use_container_width=True, hide_index=True)
+    _rtl_table(pd.DataFrame([(lbl, val) for lbl, val in pairs], columns=["שדה", "ערך"]))
 
 
 def _page_map(rows, stop_latlon=None, key="pmap"):
@@ -704,8 +737,7 @@ def render_stop_page(code):
              "daily_trips": "נסיעות/יום", "_score": "ציון"}
     _t = (serving[[c for c in _cols if c in serving.columns]].rename(columns=_cols)
           .sort_values("ציון", ascending=False).round(1))
-    st.dataframe(_t.style.set_properties(**{"text-align": "right", "direction": "rtl"}),
-                 use_container_width=True, hide_index=True, height=320)
+    _rtl_table(_t, max_height=320)
     _opts = {f"{rr['line_number']} · {rr['operator']} (מק״ט {rr['makat']})": str(rr["makat"])
              for _, rr in serving.iterrows()}
     _pick = st.selectbox("פתח עמוד קו מהתחנה הזו:", ["—"] + list(_opts), key=f"stop_to_line_{code}")
@@ -1671,11 +1703,7 @@ sel_rows = df_view.iloc[sel_indices]
 # ── helpers for the detail panel ──────────────────────────────────────────────
 def kv_table(rows):
     """rows: list of (label, value). Renders a compact RTL key-value table."""
-    d = pd.DataFrame(rows, columns=["שדה", "ערך"])
-    st.dataframe(
-        d.style.set_properties(**{"text-align": "right", "direction": "rtl"}),
-        use_container_width=True, hide_index=True,
-    )
+    _rtl_table(pd.DataFrame(rows, columns=["שדה", "ערך"]))
 
 
 raw_gtfs = load_raw_gtfs()
@@ -1750,11 +1778,7 @@ if _bk_rows:
                 out.append(f"background-color:rgb({r},{g},{b});color:{txt}")
             return out
 
-        st.dataframe(
-            bk_df.style.set_properties(**{"text-align": "right", "direction": "rtl"})
-                 .apply(_blue, subset=["תרומה לציון"]),
-            use_container_width=True, hide_index=True,
-        )
+        _rtl_table(bk_df, bg={"תרומה לציון": _blue(bk_df["תרומה לציון"])})
         st.markdown(f"**ציון סופי = {_bk_final:.1f}**  (סכום התרומות)")
 
 # 2) all-source data grouped into tabs
@@ -1817,10 +1841,7 @@ with tab_dirs:
                 "headway_min": "Headway", "length_km": "אורך", "peak_trips": "נסיעות פיק",
             }
             d = dirs[[c for c in show_cols if c in dirs.columns]].rename(columns=show_cols)
-            st.dataframe(
-                d.round(2).style.set_properties(**{"text-align": "right", "direction": "rtl"}),
-                use_container_width=True, hide_index=True,
-            )
+            _rtl_table(d.round(2))
         else:
             st.info("אין נתוני מסלול גולמיים לקו זה.")
     else:
