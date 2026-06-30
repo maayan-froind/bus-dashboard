@@ -1155,12 +1155,16 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "chat_open" not in st.session_state:
     st.session_state.chat_open = False         # closed by default; open via the FAB
+# Chat temporarily hidden (2026-06-30, while public + testing Azure perf).
+# To restore: set SHOW_CHAT=1 as an env var (Azure App Settings, no code change)
+# or change the default below to "1". Nothing else was removed.
+SHOW_CHAT = os.environ.get("SHOW_CHAT", "0") == "1"
 # floating action button toggles the panel open/closed
-if st.button("✖" if st.session_state.chat_open else "💬", key="chatfab",
+if SHOW_CHAT and st.button("✖" if st.session_state.chat_open else "💬", key="chatfab",
              help="שאל את הנתונים בשפה חופשית"):
     st.session_state.chat_open = not st.session_state.chat_open
     st.rerun()
-if st.session_state.chat_open:
+if SHOW_CHAT and st.session_state.chat_open:
     _pending = None
     with st.container(key="chatpanel"):
         st.markdown("<div class='chat-head'>💬 שאל את הנתונים</div>", unsafe_allow_html=True)
