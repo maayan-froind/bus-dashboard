@@ -13,6 +13,7 @@ Output: stage8_validations.parquet → code, taps_total, taps_daily_avg,
         taps_peak, taps_offpeak
 """
 
+import json
 import time
 from pull_meta import record
 import requests
@@ -22,10 +23,13 @@ CKAN = "https://data.gov.il/api/3/action/datastore_search"
 RESOURCE_2026 = "3ad014c3-e0a6-4ba0-9b2b-12a29d273512"   # תיקופי מסלקה לתחנה 2026
 PAGE = 32000
 DAY_COLS = [f"day_{i}" for i in range(1, 32)]
+# time-of-day bands (the hour-range prefix of LowOrPeakDescFull), in order
+BANDS = ["04:00 - 05:59", "06:00 - 08:59", "09:00 - 11:59", "12:00 - 14:59",
+         "15:00 - 18:59", "19:00 - 23:59", "24:00 - 27:59"]
 
 
 def fetch_aggregate(resource_id):
-    totals = {}          # code -> [total, peak, offpeak]
+    totals = {}          # code -> {"t","pk","off","bands":{band:val}}
     dates = set()        # distinct (month_key, day) with any data → days covered
     offset, n = 0, 0
     while True:
@@ -48,8 +52,8 @@ def fetch_aggregate(resource_id):
                 continue
             code = str(int(code))
             band = rec.get("LowOrPeakDescFull") or ""
+            band_key = band.rsplit(" - ", 1)[0] if " - " in band else band
             is_peak = "שיא" in band
-            is_off = "שפל" in band
             mk = rec.get("month_key")
             row_sum = 0.0
             for di, c in enumerate(DAY_COLS, start=1):
@@ -57,12 +61,10 @@ def fetch_aggregate(resource_id):
                 if v:
                     row_sum += float(v)
                     dates.add((mk, di))
-            t = totals.setdefault(code, [0.0, 0.0, 0.0])
-            t[0] += row_sum
-            if is_peak:
-                t[1] += row_sum
-            elif is_off:
-                t[2] += row_sum
+            t = totals.setdefault(code, {"t": 0.0, "pk": 0.0, "off": 0.0, "bands": {}})
+            t["t"] += row_sum
+            t["pk" if is_peak else "off"] += row_sum
+            t["bands"][band_key] = t["bands"].get(band_key, 0.0) + row_sum
         n += len(recs)
         print(f"  {n} rows aggregated … ({len(totals)} stations)")
         if len(recs) < PAGE:
@@ -76,13 +78,15 @@ def main():
     totals, days = fetch_aggregate(RESOURCE_2026)
     print(f"Covered {days} calendar days across {len(totals)} stations")
     rows = []
-    for code, (tot, pk, off) in totals.items():
+    for code, t in totals.items():
+        profile = {b: round(t["bands"].get(b, 0.0)) for b in BANDS}
         rows.append({
             "code": code,
-            "taps_total": round(tot),
-            "taps_daily_avg": round(tot / days, 1),
-            "taps_peak": round(pk),
-            "taps_offpeak": round(off),
+            "taps_total": round(t["t"]),
+            "taps_daily_avg": round(t["t"] / days, 1),
+            "taps_peak": round(t["pk"]),
+            "taps_offpeak": round(t["off"]),
+            "taps_profile": json.dumps(profile, ensure_ascii=False),
         })
     out = pd.DataFrame(rows)
     out.to_parquet("stage8_validations.parquet", index=False)

@@ -456,18 +456,23 @@ def load_stops_index(data_version: float = 0.0):
         idx[str(r.code)] = {
             "makats": {str(m) for m in mk},
             "lat": r.lat, "lon": r.lon, "name": r.name or "", "city": r.city or "",
-            "taps_daily": None, "taps_total": None, "taps_peak": None, "taps_offpeak": None,
+            "taps_daily": None, "taps_total": None, "taps_peak": None,
+            "taps_offpeak": None, "taps_profile": None,
         }
     # merge real per-stop validations (boardings) — stage8, joined by stop code
     vp = os.path.join(os.path.dirname(__file__), "stage8_validations.parquet")
     if os.path.exists(vp):
-        for r in pd.read_parquet(vp).itertuples(index=False):
+        _v = pd.read_parquet(vp)
+        _has_prof = "taps_profile" in _v.columns
+        for r in _v.itertuples(index=False):
             e = idx.get(str(r.code))
             if e:
                 e["taps_daily"] = float(r.taps_daily_avg)
                 e["taps_total"] = float(r.taps_total)
                 e["taps_peak"] = float(r.taps_peak)
                 e["taps_offpeak"] = float(r.taps_offpeak)
+                if _has_prof:
+                    e["taps_profile"] = r.taps_profile
     return idx
 
 
@@ -653,9 +658,31 @@ def render_stop_page(code):
     k4.metric("עליות ביום (ממוצע)",
               f"{info['taps_daily']:,.0f}" if info.get("taps_daily") is not None else "—",
               help="תיקופי רב-קו בפועל בכל אמצעי הכרטוס · ממוצע יומי 2026")
+    # ── validations (boardings) section — prominent, with an hourly profile ──
+    st.subheader("🎫 תיקופים (עליות בתחנה)")
+    st.caption("מקור: תיקופי מסלקה לתחנה (data.gov.il) — עליות בפועל בכל אמצעי הכרטוס, 2026")
     if info.get("taps_total") is not None:
-        st.caption(f"🎫 תיקופים (עליות) — סה״כ 2026: **{info['taps_total']:,.0f}** · "
-                   f"בשעות שיא: {info['taps_peak']:,.0f} · בשעות שפל: {info['taps_offpeak']:,.0f}")
+        v1, v2, v3 = st.columns(3)
+        v1.metric("סה״כ עליות 2026", f"{info['taps_total']:,.0f}")
+        v2.metric("עליות בשעות שיא", f"{info['taps_peak']:,.0f}")
+        v3.metric("עליות בשעות שפל", f"{info['taps_offpeak']:,.0f}")
+        _prof = info.get("taps_profile")
+        if _prof:
+            try:
+                _pd = json.loads(_prof) if isinstance(_prof, str) else {}
+            except Exception:
+                _pd = {}
+            _rows = [{"רצועת שעות": b, "עליות (סה״כ 2026)": v} for b, v in _pd.items() if v]
+            if _rows:
+                _fig = px.bar(pd.DataFrame(_rows), x="רצועת שעות", y="עליות (סה״כ 2026)",
+                              color_discrete_sequence=["#d32f2f"])
+                _fig.update_layout(height=300, font=dict(family="Heebo, sans-serif", size=12),
+                                   xaxis=dict(autorange="reversed"),
+                                   plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                                   margin=dict(t=10, b=10, l=10, r=10))
+                st.plotly_chart(_fig, use_container_width=True)
+    else:
+        st.info("אין נתוני תיקופים לתחנה זו במאגר.")
     st.subheader("🗺️ מיקום והקווים")
     _page_map(serving.head(25), stop_latlon=[info["lat"], info["lon"]], key=f"stopmap_{code}")
     st.subheader("🚌 הקווים שעוצרים בתחנה")
