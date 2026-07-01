@@ -505,23 +505,102 @@ STOPS_IDX = load_stops_index(_data_version())
 
 
 @st.cache_data(ttl=3600)
+def load_ridership_history(data_version: float = 0.0):
+    """stage9: makat → {year: {daily_pass, pkm, avg_speed}} for 2023-2025."""
+    p = os.path.join(os.path.dirname(__file__), "stage9_ridership_history.parquet")
+    if not os.path.exists(p):
+        return {}
+    idx = {}
+    for r in pd.read_parquet(p).itertuples(index=False):
+        idx.setdefault(str(r.makat), {})[int(r.year)] = {
+            "daily_pass": r.daily_pass, "pkm": r.pkm, "avg_speed": r.avg_speed}
+    return idx
+
+
+RIDERSHIP_HISTORY = load_ridership_history(_data_version())
+
+
+@st.cache_data(ttl=3600)
 def _line_taps_index(data_version: float = 0.0):
-    """Aggregate stage8 boardings (תיקופי מסלקה) to the line level: for each makat,
-    sum the boardings of every stop the line serves. NOTE: a stop's boardings are
-    shared by ALL lines stopping there, so this is a footfall proxy ALONG the route,
-    not boardings of this specific line (per-line demand comes from stage3 ridership)."""
+    """Per-makat boardings (תיקופי מסלקה) coverage + sum along the route. NOTE: a
+    stop's boardings are shared by ALL lines stopping there, so these describe
+    footfall ALONG the route, not boardings of this specific line (per-line demand
+    is stage3 ridership). We surface coverage + a NORMALIZED avg-per-stop."""
     agg = {}
     for info in STOPS_IDX.values():
+        td = info.get("taps_daily")
         has = info.get("taps_total") is not None
         for mk in info.get("makats", ()):
-            d = agg.setdefault(str(mk), {"n_stops": 0, "n_taps": 0,
-                                         "taps_total": 0.0, "taps_daily": 0.0})
+            d = agg.setdefault(str(mk), {"n_stops": 0, "n_taps": 0, "taps_daily_sum": 0.0})
             d["n_stops"] += 1
             if has:
                 d["n_taps"] += 1
-                d["taps_total"] += info["taps_total"]
-                d["taps_daily"] += (info.get("taps_daily") or 0.0)
+                d["taps_daily_sum"] += (td or 0.0)
     return agg
+
+
+@st.cache_data(ttl=3600)
+def _coord_taps_index(data_version: float = 0.0):
+    """(lat,lon) rounded → stop boardings, so a route's geo points (which carry
+    coords but no stop code) can be matched to their stage8 daily boardings."""
+    idx = {}
+    for code, info in STOPS_IDX.items():
+        lat, lon = info.get("lat"), info.get("lon")
+        if lat is None or lon is None:
+            continue
+        idx[(round(float(lat), 5), round(float(lon), 5))] = {
+            "taps": info.get("taps_daily"), "name": info.get("name", ""), "code": code}
+    return idx
+
+
+def _route_taps_chart(geo):
+    """Bar chart of daily boardings at each stop along the route (route order), so
+    the busy stops of the line are visible at a glance."""
+    cidx = _coord_taps_index(_data_version())
+    rows = []
+    for i, p in enumerate(geo):
+        try:
+            key = (round(float(p[0]), 5), round(float(p[1]), 5))
+        except (TypeError, ValueError, IndexError):
+            continue
+        hit = cidx.get(key) or {}
+        rows.append({"סדר": i + 1, "תחנה": (p[2] if len(p) > 2 else hit.get("name", "")),
+                     "עליות ליום": hit.get("taps") if hit.get("taps") is not None else 0})
+    if not rows:
+        st.caption("אין נתוני תחנות לקו זה.")
+        return
+    fig = px.bar(pd.DataFrame(rows), x="סדר", y="עליות ליום",
+                 custom_data=["תחנה"], color_discrete_sequence=["#d32f2f"])
+    fig.update_traces(hovertemplate="תחנה %{customdata[0]}<br>עליות ליום: %{y:,.0f}<extra></extra>")
+    fig.update_layout(height=320, font=dict(family="Heebo, sans-serif", size=12),
+                      xaxis_title="תחנה לפי סדר המסלול", yaxis_title="עליות ליום (ממוצע)",
+                      plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                      margin=dict(t=10, b=10, l=10, r=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _ridership_trend(makat, row):
+    """Multi-year ridership trend: 2023-2025 from stage9 + the current stage3 year."""
+    pts = dict(RIDERSHIP_HISTORY.get(str(makat), {}))
+    cy = row.get("data_year")
+    if pd.notna(cy):
+        pts[int(cy)] = {"daily_pass": row.get("daily_pass"),
+                        "pkm": row.get("PKM"), "avg_speed": row.get("AverageSpeed")}
+    pts = {y: v for y, v in pts.items() if v}
+    if len(pts) < 2:
+        st.caption("אין מספיק שנים להצגת מגמה.")
+        return
+    _LBL = {"נוסעים ביום": "daily_pass", "נוסעים לק״מ (PKM)": "pkm", "מהירות (קמ״ש)": "avg_speed"}
+    metric = st.radio("מדד", list(_LBL), horizontal=True,
+                      key=f"trend_metric_{makat}", label_visibility="collapsed")
+    fld = _LBL[metric]
+    dfp = pd.DataFrame([{"שנה": y, metric: v.get(fld)} for y, v in sorted(pts.items())])
+    fig = px.line(dfp, x="שנה", y=metric, markers=True, color_discrete_sequence=["#1a73e8"])
+    fig.update_layout(height=300, font=dict(family="Heebo, sans-serif", size=12),
+                      plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+                      margin=dict(t=10, b=10, l=10, r=10))
+    fig.update_xaxes(tickmode="array", tickvals=sorted(pts))
+    st.plotly_chart(fig, use_container_width=True)
 
 
 # ── shared helpers + dedicated line / stop pages ──────────────────────────────
@@ -606,24 +685,43 @@ def _page_map(rows, stop_latlon=None, key="pmap"):
     st_folium(fmap, use_container_width=True, height=440, returned_objects=[], key=key)
 
 
-def _pax_profile_chart(pj):
+def _pax_profile_chart(pj, key=""):
     try:
         prof = json.loads(pj) if isinstance(pj, str) else {}
     except Exception:
         prof = {}
-    rows = [{"רצועת שעות": s, "סוג יום": d, "נוסעים לנסיעה": v}
-            for d, slots in prof.items() for s, v in slots.items() if v is not None]
-    if not rows:
+    # one day-type at a time; chips switch between them. Default = weekdays.
+    _ORDER = ["ימי חול", "שישי", "שבת"]
+    _COLOR = {"ימי חול": "#1a73e8", "שישי": "#e07b0a", "שבת": "#34a853"}
+    avail = [d for d in _ORDER if any(v is not None for v in (prof.get(d) or {}).values())]
+    if not avail:
         st.caption("אין נתוני פרופיל נוסעים לקו זה.")
         return
-    fig = px.bar(pd.DataFrame(rows), x="רצועת שעות", y="נוסעים לנסיעה", color="סוג יום",
-                 barmode="group", category_orders={"רצועת שעות": _PAX_SLOTS},
-                 color_discrete_map={"ימי חול": "#1a73e8", "שישי": "#e07b0a", "שבת": "#34a853"})
+    day = st.radio("סוג יום", avail, horizontal=True,
+                   key=f"pax_day_{key}", label_visibility="collapsed")
+    rows = [{"רצועת שעות": s, "נוסעים לנסיעה": v}
+            for s, v in (prof.get(day) or {}).items() if v is not None]
+    fig = px.bar(pd.DataFrame(rows), x="רצועת שעות", y="נוסעים לנסיעה",
+                 category_orders={"רצועת שעות": _PAX_SLOTS},
+                 color_discrete_sequence=[_COLOR.get(day, "#1a73e8")])
     fig.update_layout(height=320, font=dict(family="Heebo, sans-serif", size=12),
-                      xaxis=dict(autorange="reversed"), legend=dict(orientation="h"),
+                      xaxis=dict(autorange="reversed"),
                       plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
                       margin=dict(t=10, b=10, l=10, r=10))
     st.plotly_chart(fig, use_container_width=True)
+
+
+def _goto(page):
+    """Navigate by URL so every line/stop page has its own shareable address."""
+    qp = st.query_params
+    qp.clear()
+    if page and page[0] == "line":
+        qp["page"] = "line"
+        qp["makat"] = str(page[1])
+    elif page and page[0] == "stop":
+        qp["page"] = "stop"
+        qp["code"] = str(page[1])
+    st.rerun()
 
 
 # MAINTENANCE RULE: every datum keyed by a line (makat) must surface on the line
@@ -631,10 +729,11 @@ def _pax_profile_chart(pj):
 # (render_stop_page). When a new source/stage is added, wire it into BOTH the
 # relevant per-line and per-stop views, not just one. Stop-keyed data can also be
 # aggregated to the line level (see _line_taps_index) with an honest caveat.
+# ALSO: every new source/stage must be added to render_sources_footer (the
+# "מקורות המידע" table at the bottom) so the sources list stays complete.
 def render_line_page(makat):
     if st.button("← חזרה לדשבורד", key="back_line"):
-        st.session_state.page = None
-        st.rerun()
+        _goto(None)
     sub = df_all[df_all["makat"].astype(str) == str(makat)]
     if sub.empty:
         st.error("הקו לא נמצא במאגר.")
@@ -683,6 +782,10 @@ def render_line_page(makat):
              ("ציון עמידה בלו״ז (SIRI)", _fmt(r.get("score_adherence"), 0))])
     with c2:
         st.subheader("👥 נסועה (נוסעים)")
+        if pd.notna(r.get("data_year")):
+            _q = r.get("data_quarter")
+            st.caption(f"תקופת נתוני נסועה: {int(r['data_year'])}"
+                       + (f" {_q}" if _q and str(_q) != "nan" else ""))
         _kv([("נוסעים ביום", _fmt(r.get("daily_pass"), 0)),
              ("נוסעים בשבוע", _fmt(r.get("WeeklyPassengers"), 0)),
              ("ממוצע נוסעים לשבוע", _fmt(r.get("avg_pass_week"), 0)),
@@ -696,20 +799,34 @@ def render_line_page(makat):
              ("ערך שיא בתקופת יום", _fmt(r.get("peak_period_val"))),
              ("דירוג הפחתה", _fmt(r.get("rank_reduce"), 0)),
              ("דירוג הוספה", _fmt(r.get("rank_add"), 0))])
+        _reasons = []
+        for _thr, _col in [(3, "flag_peak_lt3"), (7, "flag_peak_lt7"),
+                           (10, "flag_peak_lt10"), (15, "flag_peak_lt15")]:
+            if r.get(_col) == 1:
+                _reasons.append(f"עומס שיא מתחת ל-{_thr} נוסעים")
+                break
+        if r.get("flag_low_pkm") == 1:
+            _reasons.append("נוסעים לק״מ נמוך")
+        if _reasons:
+            st.caption("דגלי נמכרוּת (משרד התחבורה): " + " · ".join(_reasons))
+    st.subheader("📈 מגמת נסועה לאורך השנים")
+    st.caption("נוסעים ביום / נוסעים לק״מ / מהירות, לפי שנה (2023-2026) · מקור: נסועה data.gov.il")
+    _ridership_trend(makat, r)
     st.subheader("🎫 תיקופים לאורך המסלול")
-    st.caption("סה״כ עליות בכל התחנות שהקו עובר בהן · מקור: תיקופי מסלקה לתחנה (data.gov.il). "
-               "העליות בתחנה משותפות לכל הקווים בה, אז זהו מדד חשיפה לאורך המסלול ולא עליות של הקו עצמו "
+    st.caption("עליות בתחנות שהקו עובר בהן · מקור: תיקופי מסלקה לתחנה (data.gov.il). "
+               "העליות בתחנה משותפות לכל הקווים בה, אז אלה מדדי חשיפה לאורך המסלול ולא עליות של הקו עצמו "
                "(לביקוש של הקו עצמו ראו «נסועה» למעלה).")
     _lt = _line_taps_index(_data_version()).get(str(makat))
     if _lt and _lt["n_taps"]:
-        _t1, _t2, _t3 = st.columns(3)
+        _t1, _t2 = st.columns(2)
         _t1.metric("תחנות במסלול עם נתוני תיקוף", f"{_lt['n_taps']} / {_lt['n_stops']}")
-        _t2.metric("סה״כ עליות בתחנות הקו (2026)", f"{_lt['taps_total']:,.0f}")
-        _t3.metric("עליות ליום בתחנות הקו (מצטבר)", f"{_lt['taps_daily']:,.0f}")
+        _t2.metric("עליות ליום לתחנה (ממוצע)", f"{_lt['taps_daily_sum'] / _lt['n_taps']:,.0f}")
+        st.caption("עליות ליום בכל תחנה, לפי סדר המסלול (כדי לראות איפה התחנות העמוסות):")
+        _route_taps_chart(_pg_geo(r.get("geo")))
     else:
         st.info("אין נתוני תיקופים לתחנות הקו במאגר.")
     st.subheader("🕑 פרופיל נוסעים לפי שעה (נוסעים לנסיעה)")
-    _pax_profile_chart(r.get("pax_profile"))
+    _pax_profile_chart(r.get("pax_profile"), makat)
     st.subheader("🗺️ מסלול")
     _cities = r.get("cities")
     if isinstance(_cities, (list, np.ndarray)) and len(_cities):
@@ -719,8 +836,7 @@ def render_line_page(makat):
 
 def render_stop_page(code):
     if st.button("← חזרה לדשבורד", key="back_stop"):
-        st.session_state.page = None
-        st.rerun()
+        _goto(None)
     info = STOPS_IDX.get(str(code))
     if not info:
         st.error("התחנה לא נמצאה במאגר.")
@@ -781,8 +897,7 @@ def render_stop_page(code):
              for _, rr in serving.iterrows()}
     _pick = st.selectbox("פתח עמוד קו מהתחנה הזו:", ["—"] + list(_opts), key=f"stop_to_line_{code}")
     if _pick != "—":
-        st.session_state.page = ("line", _opts[_pick])
-        st.rerun()
+        _goto(("line", _opts[_pick]))
 
 
 # ── data-sources footer (what we pull + when it was updated / pulled) ─────────
@@ -836,6 +951,9 @@ def render_sources_footer():
          "עליות/תיקופים בפועל לכל תחנה (כל אמצעי הכרטוס)",
          _fmt_dt(_ckan_last_modified(_vid)) if _vid else "—",
          _fmt_dt(meta.get("validations", {}).get("pulled_at"))),
+        ("📈 נסועה היסטורית (2023-2025)", "data.gov.il",
+         "נסועה לפי שנה לניתוח מגמות (קבצי השנים הקודמות באותו מאגר נסועה)",
+         "—", _fmt_dt(meta.get("ridership_history", {}).get("pulled_at"))),
     ]
     with st.expander("ℹ️ מקורות המידע ותאריכי עדכון", expanded=False):
         html = ("<table style='width:100%;direction:rtl;border-collapse:collapse;font-size:.9rem'>"
@@ -856,14 +974,16 @@ def render_sources_footer():
                    "תאריך «עודכן במקור» של data.gov.il נשלף בזמן אמת מ-CKAN.")
 
 
-# deep-linking: ?page=line&makat=… or ?page=stop&code=… opens that page
+# The URL is the source of truth for the open page → every line/stop page has its
+# own shareable address (?page=line&makat=… / ?page=stop&code=…). _goto() writes it,
+# and browser back/forward works because we re-read the params every run.
 _qp = st.query_params
 if _qp.get("page") == "line" and _qp.get("makat"):
     st.session_state.page = ("line", str(_qp.get("makat")))
-    st.query_params.clear()
 elif _qp.get("page") == "stop" and _qp.get("code"):
     st.session_state.page = ("stop", str(_qp.get("code")))
-    st.query_params.clear()
+else:
+    st.session_state.page = None
 
 # a dedicated page reuses the main split layout (map pinned left, data right) —
 # but pages have no filter bar, so the fixed map / content start at ~64px (just
@@ -1080,8 +1200,7 @@ if _search_stops:
     _stop_target = sorted(_search_stops)[0]
     st.session_state.main_search = [s for s in search_sel
         if not (s.strip().isdigit() and s.strip() in STOPS_IDX)]
-    st.session_state.page = ("stop", _stop_target)
-    st.rerun()
+    _goto(("stop", _stop_target))
 
 
 # ── main content ──────────────────────────────────────────────────────────────
@@ -1472,8 +1591,7 @@ if view_mode == "🚏 דירוג תחנות":
     if _sev and _sev.get("type") == "cellClicked":
         _sval, _sd = _sev.get("value"), (_sev.get("data") or {})
         if isinstance(_sval, str) and _sval == str(_sd.get("קוד תחנה")):
-            st.session_state.page = ("stop", str(_sd["קוד תחנה"]))
-            st.rerun()
+            _goto(("stop", str(_sd["קוד תחנה"])))
 
     _ssel = sgrid.get("selected_rows")
     _scode = None
@@ -1488,8 +1606,7 @@ if view_mode == "🚏 דירוג תחנות":
         _sp1, _sp2 = st.columns([3, 1])
         _sp1.caption(f"🚏 תחנה {_scode} · {STOPS_IDX[_scode]['name']}")
         if _sp2.button("📄 עמוד התחנה המלא", key="open_stop_page", use_container_width=True):
-            st.session_state.page = ("stop", _scode)
-            st.rerun()
+            _goto(("stop", _scode))
     st.divider()
     _serving = (df_view[df_view["makat"].astype(str).isin(STOPS_IDX[_scode]["makats"])]
                 if _scode and _scode in STOPS_IDX else df_view.iloc[0:0])
@@ -1726,8 +1843,7 @@ if _ev and _ev.get("type") == "cellClicked":
     _val, _d = _ev.get("value"), (_ev.get("data") or {})
     # the "קו" cell is the only string cell whose value equals the row's קו value
     if isinstance(_val, str) and _val == str(_d.get("קו")) and _d.get("_makat"):
-        st.session_state.page = ("line", str(_d["_makat"]))
-        st.rerun()
+        _goto(("line", str(_d["_makat"])))
 
 # Resolve selected rows (via the hidden _idx column) → drives detail + map
 _sel = grid.get("selected_rows")
@@ -1771,8 +1887,7 @@ _rk1.markdown(
     f"**{_fmt(sel_row.get('ציון סופי'))}**"
 )
 if _rk2.button("📄 עמוד הקו המלא", key="open_line_page", use_container_width=True):
-    st.session_state.page = ("line", str(sel_row["makat"]))
-    st.rerun()
+    _goto(("line", str(sel_row["makat"])))
 
 # 1) parameter score breakdown chart
 param_scores = {PARAM_LABELS[col]: sel_row.get(col, np.nan) for col in DEFAULT_WEIGHTS}

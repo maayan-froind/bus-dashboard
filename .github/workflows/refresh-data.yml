@@ -37,13 +37,14 @@ jobs:
 
       # Manual full refresh only: slow stages that hit data.gov.il + OSRM.
       # Order matters: stage3 → stage4 → stage5 (each feeds the next / step1).
-      - name: Full refresh (ridership + stops + shapes + validations)
+      - name: Full refresh (ridership + stops + shapes + validations + history)
         if: ${{ github.event.inputs.full_refresh == 'true' }}
         run: |
           python step3_ridership.py
           python step4_stops.py
           python step5_shapes.py
           python step8_validations.py
+          python step9_ridership_history.py
 
       # Always: regenerate the planned-schedule metrics and frequencies.
       - name: Weekly refresh (GTFS schedule + frequency)

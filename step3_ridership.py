@@ -60,7 +60,11 @@ def main():
                 "WeekyRides", "UniqueStations", "AVGCommutersPerRide(Weekly)",
                 "AVGPassengersPerWeek", "OperatingCostPerPassenger",
                 "NumOfAlternatives", "DailyRides(Tuesday)", "ערך מקסימום בתקופת יום",
-                "דרוג הפחתה", "דרוג הוספה"] + _band_cols:
+                "דרוג הפחתה", "דרוג הוספה",
+                # MOT recommendation-engine low-load flags (1.0 when triggered)
+                "ערך מקסימום בתקופת יום קטן מ 3", "ערך מקסימום בתקופת יום קטן מ 7",
+                "ערך מקסימום בתקופת יום קטן מ 10", "ערך מקסימום בתקופת יום קטן מ 15",
+                "ממוצע נוסעים לקמ נמוך", "year"] + _band_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -107,6 +111,15 @@ def main():
                  peak_period_val=("ערך מקסימום בתקופת יום", "mean"),
                  rank_reduce  =("דרוג הפחתה",       "mean"),
                  rank_add     =("דרוג הוספה",       "mean"),
+                 # data period + MOT low-load recommendation flags (max = triggered
+                 # on any direction). Surface WHY a line is flagged for reduction.
+                 data_year    =("year",            "max"),
+                 data_quarter =("Q",               first_valid),
+                 flag_peak_lt3 =("ערך מקסימום בתקופת יום קטן מ 3",  "max"),
+                 flag_peak_lt7 =("ערך מקסימום בתקופת יום קטן מ 7",  "max"),
+                 flag_peak_lt10=("ערך מקסימום בתקופת יום קטן מ 10", "max"),
+                 flag_peak_lt15=("ערך מקסימום בתקופת יום קטן מ 15", "max"),
+                 flag_low_pkm  =("ממוצע נוסעים לקמ נמוך",            "max"),
              )
              .rename(columns={"RouteID": "makat"}))
 
